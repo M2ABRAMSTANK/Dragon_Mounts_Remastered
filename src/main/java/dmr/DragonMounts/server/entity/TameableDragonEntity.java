@@ -240,37 +240,37 @@ public class TameableDragonEntity extends AbstractDragonEntity {
 
         return null;
     }
-	
-	@Override
-	public void travel(Vec3 travelVector) {
-		if (!this.isInWater() || !this.canDrownInFluidType(Fluids.WATER.getFluidType())) {
-			super.travel(travelVector);
-			return;
-		}
-		
-		double y0 = this.getY();
-		float waterFriction = this.isSprinting() ? 0.7F : 0.5F;
-		float inWaterSpeedModifier = (float) this.getAttributeValue(NeoForgeMod.SWIM_SPEED);
-		
-		this.moveRelative(inWaterSpeedModifier, travelVector);
-		this.move(MoverType.SELF, this.getDeltaMovement());
-		
-		Vec3 deltaVector = this.getDeltaMovement();
-		
-		if (this.horizontalCollision && this.onClimbable()) {
-			deltaVector = new Vec3(deltaVector.x, 0.2, deltaVector.z);
-		}
-		
-		Vec3 waterDragVector = new Vec3(
-				deltaVector.x * waterFriction * 0.6D,
-				deltaVector.y * getWaterSlowDown(),
-				deltaVector.z * waterFriction * 0.6D
-		);
-		
-		this.setDeltaMovement(waterDragVector);
-		Vec3 nextDeltaVector = this.getDeltaMovement();
-		if (this.horizontalCollision && this.isFree(nextDeltaVector.x, nextDeltaVector.y + 0.6D - this.getY() + y0, nextDeltaVector.z)) {
-			this.setDeltaMovement(nextDeltaVector.x, 0.3D, nextDeltaVector.z);
-		}
-	}
+
+    @Override
+    public void travel(Vec3 travelVector) {
+        if (!this.isInWater() || !this.canDrownInFluidType(Fluids.WATER.getFluidType())) {
+            super.travel(travelVector);
+            return;
+        }
+
+        double y0 = this.getY();
+        float waterFriction = this.isSprinting() ? 0.7F : 0.5F;
+        float inWaterSpeedModifier = (float) this.getAttributeValue(NeoForgeMod.SWIM_SPEED);
+
+        this.moveRelative(inWaterSpeedModifier, travelVector);
+        this.move(MoverType.SELF, this.getDeltaMovement());
+
+        Vec3 deltaVector = this.getDeltaMovement();
+
+        if (this.horizontalCollision && this.onClimbable()) {
+            deltaVector = new Vec3(deltaVector.x, 0.2, deltaVector.z);
+        }
+
+        Vec3 waterDragVector = new Vec3(
+                deltaVector.x * waterFriction * 0.6D,
+                deltaVector.y * getWaterSlowDown(),
+                deltaVector.z * waterFriction * 0.6D);
+
+        this.setDeltaMovement(waterDragVector);
+        Vec3 nextDeltaVector = this.getDeltaMovement();
+        if (this.horizontalCollision
+                && this.isFree(nextDeltaVector.x, nextDeltaVector.y + 0.6D - this.getY() + y0, nextDeltaVector.z)) {
+            this.setDeltaMovement(nextDeltaVector.x, 0.3D, nextDeltaVector.z);
+        }
+    }
 }

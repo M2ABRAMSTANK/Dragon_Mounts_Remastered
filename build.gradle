@@ -25,7 +25,9 @@ spotless {
         importOrder 'java', 'javax', 'org', 'com', 'net.minecraft', 'net.neoforged', ''
         removeUnusedImports()
         cleanthat()
-        palantirJavaFormat()
+        // Pinned: default palantir-java-format breaks on JDK 21.0.5+
+        // (javac DeferredDiagnosticHandler backport, JDK-8332744); 2.50.0 handles it.
+        palantirJavaFormat('2.50.0')
         trimTrailingWhitespace()
         endWithNewline()
         formatAnnotations()

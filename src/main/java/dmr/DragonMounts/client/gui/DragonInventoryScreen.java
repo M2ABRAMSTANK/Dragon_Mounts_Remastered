@@ -191,7 +191,13 @@ public class DragonInventoryScreen extends AbstractContainerScreen<DragonContain
 
     public static class ModeButton extends ExtendedButton {
         public ModeButton(int xPos, int yPos, String text, Button.OnPress handler) {
-            super(xPos, yPos, 18, 18, Component.literal(Component.translatable(text).getString(1)), handler);
+            super(
+                    xPos,
+                    yPos,
+                    18,
+                    18,
+                    Component.literal(Component.translatable(text).getString(1)),
+                    handler);
             this.setTooltip(Tooltip.create(Component.translatable(text)));
         }
     }

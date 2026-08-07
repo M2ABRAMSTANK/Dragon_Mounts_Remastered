@@ -10,7 +10,6 @@ import net.minecraft.world.level.pathfinder.PathFinder;
 import net.minecraft.world.level.pathfinder.PathType;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.Tags.Fluids;
-
 import org.jetbrains.annotations.Nullable;
 
 public class DragonPathNavigation extends FlyingPathNavigation {
@@ -63,7 +62,7 @@ public class DragonPathNavigation extends FlyingPathNavigation {
         if (lastPathCreationDelta < TICKS_BETWEEN_PATH_CREATIONS) {
             return null;
         }
-        
+
         lastPathCreationDelta = 0;
 
         dragonNodeEvaluator.allowSwimming = dragon.getBreed() != null
@@ -80,7 +79,7 @@ public class DragonPathNavigation extends FlyingPathNavigation {
         // Otherwise, let's try and get a path to the target position by walking or swimming.
         Path path = super.createPath(pos, accuracy);
         if (path != null && path.canReach() && path.getNodeCount() > 1) {
-          return path;
+            return path;
         }
 
         // If there's no reason for the dragon to fly, settle for the walking/swimming path.
@@ -99,7 +98,7 @@ public class DragonPathNavigation extends FlyingPathNavigation {
 
         Path path = super.createPath(pos, accuracy);
         if (path == null) {
-          return path;
+            return path;
         }
 
         // If we can skip nodes that get the dragon farther away from the player to stop the dragon from travelling back
