@@ -25,10 +25,18 @@ import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.neoforged.neoforge.event.tick.LevelTickEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 @EventBusSubscriber(modid = DMR.MOD_ID)
 public class DragonWhistleEvent {
+
+    @SubscribeEvent
+    public static void onServerTick(ServerTickEvent.Post event) {
+        // Wave 2: re-checks summons that were deferred because the bound dragon's chunk
+        // was not loaded (chunk-ticket path in DragonWhistleHandler.callDragon).
+        DragonWhistleHandler.processDeferredSummons(event.getServer());
+    }
 
     @SubscribeEvent
     public static void onWorldTick(LevelTickEvent.Post event) {

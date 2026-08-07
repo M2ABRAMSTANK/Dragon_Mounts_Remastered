@@ -10,7 +10,6 @@ import dmr.DragonMounts.registry.ModCriterionTriggers;
 import dmr.DragonMounts.server.ai.DragonAI;
 import dmr.DragonMounts.server.entity.dragon.AbstractDragonEntity;
 import dmr.DragonMounts.server.inventory.DragonInventoryHandler.DragonInventory;
-import dmr.DragonMounts.server.worlddata.DragonWorldDataManager;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.util.Optional;
 import lombok.Getter;
@@ -192,6 +191,25 @@ public class TameableDragonEntity extends AbstractDragonEntity {
             this.heal((float) ServerConfig.HEALTH_REGEN);
         }
 
+        // Wave 2 follow-up (code-investigation.md defect: "DragonInstance.lastPos is
+        // stale by construction"): lastPos was previously only written at bind time and
+        // on changeDimension, so a dragon that stays in one dimension but wanders away
+        // from wherever it was last written (owner travels/waystones off, dragon's chunk
+        // unloads elsewhere) left the whistle summon path ticketing/searching a stale
+        // chunk. Refresh periodically while tamed — cheap at this cadence, and exactly
+        // the data the summon path needs to have correct when the dragon's chunk isn't
+        // currently loaded (upstream #124/#125).
+        if (!this.level.isClientSide && this.isAlive() && this.isTame() && this.tickCount % 100 == 0) {
+            var owner = resolveOwnerServerWide();
+            if (owner != null) {
+                var summonIndex = DragonWhistleHandler.getDragonSummonIndex(owner, getDragonUUID());
+                if (summonIndex.isPresent()) {
+                    PlayerStateUtils.getHandler(owner)
+                            .setDragonInstance(summonIndex.getAsInt(), new DragonInstance(this));
+                }
+            }
+        }
+
         if (getDragonInventory() != null && getDragonInventory().isDirty()) {
             updateContainerEquipment();
         }
@@ -217,43 +235,81 @@ public class TameableDragonEntity extends AbstractDragonEntity {
         var entity = super.changeDimension(transition);
 
         if (entity instanceof TameableDragonEntity dragon) {
-            var owner = getOwner();
-
             DMR.LOGGER.debug(
                     "Changing dimension of dragon {} to {}",
                     getDragonUUID(),
                     transition.newLevel().dimension().location());
 
-            if (owner instanceof Player player) {
-                var handler = PlayerStateUtils.getHandler(player);
-                var summonIndex = DragonWhistleHandler.getDragonSummonIndex(player, getDragonUUID());
+            // Wave 2: resolve the owner server-wide, NEVER via the level-scoped
+            // getOwner(). During ridden transits passengers move first, and on
+            // Nether->Overworld returns the owner is not in the dragon's (old) level;
+            // both made getOwner() return null and left DragonInstance.dimension stale
+            // (the "directional rot", .fork-notes/code-investigation.md) — the root of
+            // the #123/#98 clone-and-delete cascades.
+            var owner = resolveOwnerServerWide();
+
+            if (owner != null) {
+                var handler = PlayerStateUtils.getHandler(owner);
+                var summonIndex = DragonWhistleHandler.getDragonSummonIndex(owner, getDragonUUID());
 
                 // Unbound dragons have no whistle binding to update — the old .orElse(0)
                 // fallback wrote their instance into slot 0 and condemned that slot's
                 // bound dragon to the dedup check.
                 if (summonIndex.isPresent()) {
                     var index = summonIndex.getAsInt();
+                    // Always refresh the binding: dimension + lastPos from the arrival
+                    // level (the new DragonInstance reads them off the arrived entity).
                     handler.setDragonInstance(index, new DragonInstance(dragon));
 
-                    // Update lastSummon to new UUID to prevent despawns
+                    // Update lastSummon to the arrived entity's UUID to prevent despawns;
+                    // conditioned on this dragon actually being the bound one.
                     if (handler.lastSummons.get(index) != null
                             && handler.lastSummons.get(index).equals(getUUID())) {
                         handler.lastSummons.put(index, entity.getUUID());
                     }
                 }
             }
+            // Owner offline: NeoForge data attachments live on the loaded Player entity;
+            // an offline owner's attachment is not loaded and cannot be safely rewritten
+            // from here. The binding is reconciled on the owner's next login instead
+            // (PlayerJoinWorld.onPlayerJoinWorld), and the summon path's chunk-ticket
+            // re-check tolerates a stale dimension in the meantime.
 
-            var worldData1 = DragonWorldDataManager.getInstance(level);
-            var worldData2 = DragonWorldDataManager.getInstance(transition.newLevel());
-
-            // Transfer the dragon inventory. B2: never put(uuid, null) — skip the put when
-            // the source level has no entry for this dragon.
-            var transferredInventory = worldData1.dragonInventories.remove(getDragonUUID());
-            if (transferredInventory != null) {
-                worldData2.dragonInventories.put(getDragonUUID(), transferredInventory);
-            }
+            // NOTE (Wave 2, B1): the manual inventory hand-off that used to live here is
+            // gone — dragon inventories are stored once, globally, on the overworld
+            // (DragonInventoryHandler.getOrCreateInventory), so a dimension change no
+            // longer moves any inventory entry.
 
             return dragon;
+        }
+
+        return null;
+    }
+
+    /**
+     * Resolves this dragon's owner across the whole server: the player list first, then
+     * every level's player list (gametest mock players are ticked in a level without
+     * being registered in the server player list).
+     */
+    private @Nullable Player resolveOwnerServerWide() {
+        var ownerId = getOwnerUUID();
+        var server = getServer();
+
+        if (ownerId == null || server == null) {
+            return null;
+        }
+
+        Player owner = server.getPlayerList().getPlayer(ownerId);
+        if (owner != null) {
+            return owner;
+        }
+
+        for (var serverLevel : server.getAllLevels()) {
+            for (var candidate : serverLevel.players()) {
+                if (candidate.getUUID().equals(ownerId)) {
+                    return candidate;
+                }
+            }
         }
 
         return null;

@@ -78,11 +78,9 @@ public class CommunityRegressionTests {
      * @param helper The game test helper
      */
     @EmptyTemplate(floor = true)
-    @GameTest(required = false)
+    @GameTest
     @TestHolder
     public static void riddenPortalTransitUpdatesInstance(ExtendedGameTestHelper helper) {
-        // RED until Wave 2 — instance update is owner-gated and getOwner() is level-scoped;
-        // see .fork-notes/fix-plan.md
         var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
         player.moveToCentre();
 
@@ -331,8 +329,9 @@ public class CommunityRegressionTests {
      * the dragon's (old) level, so the DragonInstance dimension update is skipped
      * while the inventory hand-off still fires; the next summon then reads the stale
      * dimension and null-clobbers the good inventory entry (#98's items-gone /
-     * flags-survive signature). After Wave 2 the hand-off is owned solely by
-     * changeDimension and this scenario must keep the items.
+     * flags-survive signature). Since Wave 2 there are no hand-off blocks at all —
+     * inventories live in a single global (overworld) store — and this scenario must
+     * keep the items.
      *
      * @param helper The game test helper
      */
@@ -381,71 +380,82 @@ public class CommunityRegressionTests {
             return;
         }
 
-        // Summon #1: cross-dimension
-        if (!DragonWhistleHandler.callDragon(player)) {
-            helper.fail("First cross-dimension summon failed");
-            return;
-        }
+        // Cross-dimension summons can complete asynchronously (Wave 2): gametest Nether
+        // entities are parked in non-visible entity sections, so the summon path tickets
+        // the dragon's chunk and re-checks over the following ticks. Run the two summons
+        // as a sequence with a wait after each instead of asserting synchronously.
+        helper.startSequence()
+                .thenExecute(() -> {
+                    // Summon #1: cross-dimension
+                    if (!DragonWhistleHandler.callDragon(player)) {
+                        helper.fail("First cross-dimension summon failed");
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    var afterFirst = DragonWhistleHandler.findDragon(player, 0);
+                    helper.assertTrue(afterFirst != null, "Dragon not found after first cross-dimension summon");
+                    helper.assertTrue(
+                            afterFirst.hasChest()
+                                    && afterFirst
+                                            .getInventory()
+                                            .getItem(DragonInventory.CHEST_SLOT)
+                                            .is(Items.CHEST)
+                                    && !afterFirst.getInventory().getItem(5).isEmpty(),
+                            "Dragon chest inventory lost after the FIRST cross-dimension summon");
+                })
+                .thenExecute(() -> {
+                    // Dragon wanders back through the portal and returns (#123's exact repro
+                    // shape): Overworld -> Nether (owner visible), then Nether -> Overworld
+                    // (owner NOT in the Nether, so a level-scoped owner lookup would fail
+                    // during the return transit).
+                    var afterFirst = DragonWhistleHandler.findDragon(player, 0);
+                    helper.assertTrue(afterFirst != null, "Dragon vanished between the two summons");
 
-        var afterFirst = DragonWhistleHandler.findDragon(player, 0);
-        if (afterFirst == null) {
-            helper.fail("Dragon not found after first cross-dimension summon");
-            return;
-        }
-        if (!afterFirst.hasChest()
-                || !afterFirst
-                        .getInventory()
-                        .getItem(DragonInventory.CHEST_SLOT)
-                        .is(Items.CHEST)
-                || afterFirst.getInventory().getItem(5).isEmpty()) {
-            helper.fail("Dragon chest inventory lost after the FIRST cross-dimension summon");
-            return;
-        }
+                    var wanderToNether = new DimensionTransition(
+                            netherDim,
+                            new Vec3(16, 100, 16),
+                            new Vec3(0, 0, 0),
+                            0,
+                            0,
+                            true,
+                            DimensionTransition.DO_NOTHING);
+                    var wanderer = (TameableDragonEntity) afterFirst.changeDimension(wanderToNether);
+                    if (wanderer == null) {
+                        helper.fail("Second dimension change returned null");
+                        return;
+                    }
 
-        // Dragon wanders back through the portal and returns (#123's exact repro shape):
-        // Overworld -> Nether (owner visible), then Nether -> Overworld (owner NOT in the
-        // Nether, so the level-scoped owner lookup fails during the return transit).
-        var wanderToNether = new DimensionTransition(
-                netherDim, new Vec3(16, 100, 16), new Vec3(0, 0, 0), 0, 0, true, DimensionTransition.DO_NOTHING);
-        var wanderer = (TameableDragonEntity) afterFirst.changeDimension(wanderToNether);
-        if (wanderer == null) {
-            helper.fail("Second dimension change returned null");
-            return;
-        }
+                    var backToOverworld = new DimensionTransition(
+                            helper.getLevel(),
+                            new Vec3(player.getX(), player.getY(), player.getZ()),
+                            new Vec3(0, 0, 0),
+                            0,
+                            0,
+                            true,
+                            DimensionTransition.DO_NOTHING);
+                    var returned = (TameableDragonEntity) wanderer.changeDimension(backToOverworld);
+                    if (returned == null) {
+                        helper.fail("Return dimension change returned null");
+                        return;
+                    }
 
-        var backToOverworld = new DimensionTransition(
-                helper.getLevel(),
-                new Vec3(player.getX(), player.getY(), player.getZ()),
-                new Vec3(0, 0, 0),
-                0,
-                0,
-                true,
-                DimensionTransition.DO_NOTHING);
-        var returned = (TameableDragonEntity) wanderer.changeDimension(backToOverworld);
-        if (returned == null) {
-            helper.fail("Return dimension change returned null");
-            return;
-        }
-
-        // Summon #2: the capability still believes the dragon is in the Nether
-        if (!DragonWhistleHandler.callDragon(player)) {
-            helper.fail("Second cross-dimension summon failed");
-            return;
-        }
-
-        var afterSecond = DragonWhistleHandler.findDragon(player, 0);
-        if (afterSecond == null) {
-            helper.fail("Dragon not found after second cross-dimension summon");
-            return;
-        }
-
-        if (!afterSecond.getInventory().getItem(DragonInventory.CHEST_SLOT).is(Items.CHEST)
-                || afterSecond.getInventory().getItem(5).isEmpty()) {
-            helper.fail("Dragon chest inventory lost after two consecutive cross-dimension summons");
-            return;
-        }
-
-        helper.succeed();
+                    // Summon #2
+                    if (!DragonWhistleHandler.callDragon(player)) {
+                        helper.fail("Second cross-dimension summon failed");
+                    }
+                })
+                .thenWaitUntil(() -> {
+                    var afterSecond = DragonWhistleHandler.findDragon(player, 0);
+                    helper.assertTrue(afterSecond != null, "Dragon not found after second cross-dimension summon");
+                    helper.assertTrue(
+                            afterSecond
+                                            .getInventory()
+                                            .getItem(DragonInventory.CHEST_SLOT)
+                                            .is(Items.CHEST)
+                                    && !afterSecond.getInventory().getItem(5).isEmpty(),
+                            "Dragon chest inventory lost after two consecutive cross-dimension summons");
+                })
+                .thenSucceed();
     }
 
     /**

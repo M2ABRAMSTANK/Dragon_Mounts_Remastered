@@ -580,10 +580,9 @@ public class DragonWhistleTests {
      * @param helper The game test helper
      */
     @EmptyTemplate(floor = true)
-    @GameTest(required = false)
+    @GameTest
     @TestHolder
     public static void callAcrossDimensions(ExtendedGameTestHelper helper) {
-        // RED until Wave 2 — baseline clones+orphans; see .fork-notes/fix-plan.md
         var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
         player.moveToCentre();
 
@@ -643,47 +642,45 @@ public class DragonWhistleTests {
             return;
         }
 
-        var checkDragon = DragonWhistleHandler.findDragon(player, 0);
+        // The summon can complete asynchronously: gametest Nether entities are parked in
+        // non-visible entity sections, so the summon path tickets the dragon's chunk and
+        // re-checks over the following ticks (Wave 2). Poll until the REAL dragon has
+        // arrived instead of asserting synchronously.
+        helper.succeedWhen(() -> {
+            var checkDragon = DragonWhistleHandler.findDragon(player, 0);
 
-        if (checkDragon == null) {
-            helper.fail("Dragon was not found after being called from another dimension");
-            return;
-        }
+            helper.assertTrue(checkDragon != null, "Dragon was not found after being called from another dimension");
 
-        // Identity: a cross-dimension summon must move the SAME entity, not clone it
-        if (!checkDragon.getUUID().equals(entityUuid)) {
-            helper.fail("Dragon was cloned instead of teleported: entity UUID changed from " + entityUuid + " to "
-                    + checkDragon.getUUID());
-            return;
-        }
+            // Identity: a cross-dimension summon must move the SAME entity, not clone it
+            helper.assertTrue(
+                    checkDragon.getUUID().equals(entityUuid),
+                    "Dragon was cloned instead of teleported: entity UUID changed from " + entityUuid + " to "
+                            + checkDragon.getUUID());
 
-        // Uniqueness: exactly one dragon with this dragonUUID may exist across all levels
-        int count = 0;
-        for (var serverLevel : server.getAllLevels()) {
-            count += serverLevel
-                    .getEntities(ModEntities.DRAGON_ENTITY.get(), entity -> dragonUuid.equals(entity.getDragonUUID()))
-                    .size();
-        }
-        if (count != 1) {
-            helper.fail(
+            // Uniqueness: exactly one dragon with this dragonUUID may exist across all levels
+            int count = 0;
+            for (var serverLevel : server.getAllLevels()) {
+                count += serverLevel
+                        .getEntities(
+                                ModEntities.DRAGON_ENTITY.get(), entity -> dragonUuid.equals(entity.getDragonUUID()))
+                        .size();
+            }
+            helper.assertTrue(
+                    count == 1,
                     "Expected exactly one dragon with dragonUUID " + dragonUuid + " across all levels, found " + count);
-            return;
-        }
 
-        // The dragon must have arrived in the player's dimension
-        if (!checkDragon.level().dimension().equals(helper.getLevel().dimension())) {
-            helper.fail("Dragon is not in the summoning player's dimension: "
-                    + checkDragon.level().dimension().location());
-            return;
-        }
+            // The dragon must have arrived in the player's dimension
+            helper.assertTrue(
+                    checkDragon.level().dimension().equals(helper.getLevel().dimension()),
+                    "Dragon is not in the summoning player's dimension: "
+                            + checkDragon.level().dimension().location());
 
-        // Verify the dragon's inventory was transferred
-        if (!checkDragon.hasChest() || checkDragon.getInventory().getItem(0).isEmpty()) {
-            helper.fail("Dragon's inventory was not transferred correctly between dimensions");
-            return;
-        }
-
-        helper.succeed();
+            // Verify the dragon's inventory was transferred
+            helper.assertTrue(
+                    checkDragon.hasChest()
+                            && !checkDragon.getInventory().getItem(0).isEmpty(),
+                    "Dragon's inventory was not transferred correctly between dimensions");
+        });
     }
 
     /**

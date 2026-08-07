@@ -14,6 +14,7 @@ import lombok.Setter;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.Container;
 import net.minecraft.world.ContainerListener;
@@ -75,19 +76,60 @@ public class DragonInventoryHandler {
             return clientSideInventories.get(uuid);
         }
 
-        DragonWorldData data = DragonWorldData.getInstance(level);
+        // Wave 2 (advisor Q8): ALL server-side dragon-inventory access goes through a
+        // single GLOBAL store — the overworld's DragonWorldData. The old per-dimension
+        // stores plus two manual hand-off blocks were the #98 split-brain: equipment
+        // flags travelled in entity NBT while contents sat in whichever dimension's
+        // store last ran a hand-off (neither called setDirty). Entries written by older
+        // versions are migrated lazily: on a global-store miss, the entity's current
+        // level's store is checked and that single entry is moved up.
+        // (dragonHistory/deadDragons intentionally stay per-dimension — community.2.)
+        var globalLevel = ((ServerLevel) level).getServer().overworld();
+        DragonWorldData globalData = DragonWorldData.getInstance(globalLevel);
 
-        if (!data.dragonInventories.containsKey(uuid) || data.dragonInventories.get(uuid) == null) {
+        DragonInventory inventory = globalData.dragonInventories.get(uuid);
+
+        if (inventory == null) {
+            // Wave 2 follow-up: scan EVERY dimension's local store, not just the dragon's
+            // CURRENT level. The old check (`level != globalLevel`) only looked at the
+            // dragon's current dimension, so a dragon that had already returned to the
+            // overworld (level == globalLevel) with its legacy inventory still stranded in
+            // the Nether/End's store skipped migration entirely and fell straight to
+            // "create new inventory" below — silently and irrecoverably losing the
+            // saddle/armor/chest contents (the exact #98 signature: equipment flags on the
+            // entity, contents lost in the wrong dimension's SavedData). A stray entry can
+            // be left in ANY dimension by the pre-Wave-2 hand-off code or a third-party
+            // teleport (Waystones) that bypassed changeDimension.
+            for (var candidateLevel : ((ServerLevel) level).getServer().getAllLevels()) {
+                if (candidateLevel == globalLevel) {
+                    continue; // already checked above
+                }
+
+                DragonWorldData localData = DragonWorldData.getInstance(candidateLevel);
+                var migrated = localData.dragonInventories.remove(uuid);
+                if (migrated != null) {
+                    DMR.LOGGER.info(
+                            "Migrating dragon inventory {} from stranded per-dimension store {} to the global"
+                                    + " (overworld) store",
+                            uuid,
+                            candidateLevel.dimension().location());
+                    globalData.dragonInventories.put(uuid, migrated);
+                    globalData.setDirty();
+                    localData.setDirty();
+                    inventory = migrated;
+                    break;
+                }
+            }
+        }
+
+        if (inventory == null) {
             DMR.LOGGER.debug("Creating new dragon inventory for {}", uuid);
-            data.dragonInventories.put(uuid, new DragonInventory(level));
-            data.setDirty();
+            inventory = new DragonInventory(level);
+            globalData.dragonInventories.put(uuid, inventory);
+            globalData.setDirty();
         }
 
-        if (data.dragonInventories.get(uuid) == null) {
-            throw new NullPointerException("Dragon inventory is null for " + uuid);
-        }
-
-        return data.dragonInventories.get(uuid);
+        return inventory;
     }
 
     public static class DragonInventory implements NBTInterface, ContainerListener {

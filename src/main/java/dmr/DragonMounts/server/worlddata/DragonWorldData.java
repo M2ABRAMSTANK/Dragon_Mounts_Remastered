@@ -23,6 +23,11 @@ public class DragonWorldData extends SavedData {
     public Map<UUID, String> deathMessages = new HashMap<>();
     public List<UUID> deadDragons = new ArrayList<>();
 
+    // Wave 2: dragon inventories are GLOBAL — only the OVERWORLD's instance of this map
+    // is authoritative (DragonInventoryHandler.getOrCreateInventory routes all access
+    // there and lazily migrates entries out of other dimensions' stores). Entries in a
+    // non-overworld store are legacy data awaiting migration. dragonHistory/deadDragons
+    // deliberately remain per-dimension (community.2).
     public Map<UUID, DragonInventory> dragonInventories = new HashMap<>();
 
     public Map<UUID, DragonHistory> dragonHistory = new LinkedHashMap<>() {

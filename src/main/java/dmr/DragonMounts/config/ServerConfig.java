@@ -183,7 +183,11 @@ public class ServerConfig {
                 "AGGRESSIVE = cancel loading of the mismatched entity (may DELETE the original dragon if the binding is stale)."
             },
             category = "whistle")
-    public static DuplicateResolution DUPLICATE_RESOLUTION = DuplicateResolution.AGGRESSIVE;
+    // Default flipped AGGRESSIVE -> LOG in Wave 2 (advisor B4 coupling): now that the
+    // summon path teleports the real dragon instead of cloning it, join-cancel removal
+    // is no longer needed to contain duplication — and with a stale binding AGGRESSIVE
+    // deletes the ORIGINAL dragon. LOG never cancels, but keeps operator visibility.
+    public static DuplicateResolution DUPLICATE_RESOLUTION = DuplicateResolution.LOG;
 
     @Config(
             key = "dragon_egg_spawn_chance",
