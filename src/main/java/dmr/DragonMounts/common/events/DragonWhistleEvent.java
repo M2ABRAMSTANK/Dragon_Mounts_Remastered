@@ -43,14 +43,23 @@ public class DragonWhistleEvent {
         if (!event.getLevel().isClientSide) {
             var data = DragonWorldDataManager.getInstance(event.getLevel());
 
+            // Wave 3: the save()/load() fix un-masks this — deadDragons previously never
+            // survived a restart, so deathDelay.get(uuid) never actually missed an entry
+            // in practice. Now that dead-dragon state round-trips, deadDragons and
+            // deathDelay/deathMessages are still written together at every mutation site
+            // (setDragonDead/clearDragonData), but getOrDefault stays defensive against
+            // any stale/legacy save where the two drifted apart — a raw .get(uuid) here
+            // unboxes a null Integer and NPEs the level tick.
             for (var uuid : data.deadDragons) {
-                if (data.deathDelay.get(uuid) > 0) {
-                    data.deathDelay.put(uuid, data.deathDelay.get(uuid) - 1);
+                var delay = data.deathDelay.getOrDefault(uuid, 0);
+                if (delay > 0) {
+                    data.deathDelay.put(uuid, delay - 1);
+                    data.setDirty();
                 }
             }
 
             for (var uuid : new CopyOnWriteArrayList<>(data.deadDragons)) {
-                if (data.deathDelay.get(uuid) <= 0) {
+                if (data.deathDelay.getOrDefault(uuid, 0) <= 0) {
                     DragonWorldDataManager.clearDragonData(event.getLevel(), uuid);
                 }
             }

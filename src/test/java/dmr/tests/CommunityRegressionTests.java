@@ -223,11 +223,9 @@ public class CommunityRegressionTests {
      * @param helper The game test helper
      */
     @EmptyTemplate(floor = true)
-    @GameTest(required = false)
+    @GameTest
     @TestHolder
     public static void snapshotMissingAttributeTagsDoesNotPinStats(ExtendedGameTestHelper helper) {
-        // RED until Wave 3 — unguarded attribute reads pin stats to minimum on missing tags;
-        // see .fork-notes/fix-plan.md
         var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
         player.moveToCentre();
 
@@ -286,11 +284,9 @@ public class CommunityRegressionTests {
      * @param helper The game test helper
      */
     @EmptyTemplate
-    @GameTest(required = false)
+    @GameTest
     @TestHolder
     public static void deadDragonStateSurvivesSaveLoad(ExtendedGameTestHelper helper) {
-        // RED until Wave 3 — save() writes dead-dragon fields onto the wrong tag;
-        // see .fork-notes/fix-plan.md
         var provider = helper.getLevel().registryAccess();
 
         var data = new DragonWorldData();

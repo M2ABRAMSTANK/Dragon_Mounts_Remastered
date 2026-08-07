@@ -100,6 +100,18 @@ abstract class DragonAttributeComponent extends DragonSpawnComponent {
     }
 
     public void setRandomStats() {
+        // Wave 3: ENABLE_RANDOM_STATS was declared but never read — configs that set it
+        // false expecting the feature off had no effect. When false, actively remove any
+        // already-applied random-stats modifier (not merely skip re-adding it): a dragon
+        // that rolled stats while the config was true must lose the bonus/penalty the
+        // moment an operator flips it false, not just stop re-rolling.
+        if (!ServerConfig.ENABLE_RANDOM_STATS) {
+            removeRandomStatsModifierIfPresent(MAX_HEALTH);
+            removeRandomStatsModifierIfPresent(ATTACK_DAMAGE);
+            removeRandomStatsModifierIfPresent(MOVEMENT_SPEED);
+            return;
+        }
+
         {
             var randomStatsHealth = new AttributeModifier(
                     RANDOM_STATS_MODIFIER,
@@ -146,6 +158,14 @@ abstract class DragonAttributeComponent extends DragonSpawnComponent {
                     speedInstance.removeModifier(RANDOM_STATS_MODIFIER);
                 speedInstance.addTransientModifier(randomStatsSpeed);
             }
+        }
+    }
+
+    /** Wave 3: removes a lingering RANDOM_STATS_MODIFIER when enable_random_stats is false. */
+    private void removeRandomStatsModifierIfPresent(Holder<Attribute> attribute) {
+        var instance = getAttribute(attribute);
+        if (instance != null && instance.hasModifier(RANDOM_STATS_MODIFIER)) {
+            instance.removeModifier(RANDOM_STATS_MODIFIER);
         }
     }
 
@@ -224,9 +244,23 @@ abstract class DragonAttributeComponent extends DragonSpawnComponent {
     public void readAdditionalSaveData(CompoundTag compound) {
         super.readAdditionalSaveData(compound);
 
-        entityData.set(healthAttribute, compound.getFloat("healthAttribute"));
-        entityData.set(speedAttribute, compound.getFloat("speedAttribute"));
-        entityData.set(damageAttribute, compound.getFloat("damageAttribute"));
-        entityData.set(maxScaleAttribute, compound.getFloat("maxScaleAttribute"));
+        // Wave 3: a snapshot missing one of these tags (legacy/partial data, or a
+        // hand-trimmed clone snapshot — see CommunityRegressionTests) must keep whatever
+        // value the entity already has (rolled at construction/finalizeSpawn), never fall
+        // through to CompoundTag.getFloat's 0.0f default. 0.0f maps to the MINIMUM
+        // possible stat roll via upperLower(), matching upstream #127/#128's "lowest
+        // stats" reports.
+        if (compound.contains("healthAttribute")) {
+            entityData.set(healthAttribute, compound.getFloat("healthAttribute"));
+        }
+        if (compound.contains("speedAttribute")) {
+            entityData.set(speedAttribute, compound.getFloat("speedAttribute"));
+        }
+        if (compound.contains("damageAttribute")) {
+            entityData.set(damageAttribute, compound.getFloat("damageAttribute"));
+        }
+        if (compound.contains("maxScaleAttribute")) {
+            entityData.set(maxScaleAttribute, compound.getFloat("maxScaleAttribute"));
+        }
     }
 }

@@ -112,15 +112,22 @@ public class DragonWorldData extends SavedData {
     public CompoundTag save(CompoundTag pCompoundTag, Provider provider) {
         CompoundTag tag = new CompoundTag();
 
-        tag.putInt("num", deathDelay.size());
+        // Wave 3: was writing uuid/delay/message onto the OUTER tag and appending an
+        // EMPTY compound to the list (every iteration clobbered the previous one's
+        // fields on `tag`, and `listtag` never received any data) — deadDragons,
+        // deathDelay, and deathMessages never survived a save/load round-trip. Fields now
+        // go on the PER-ENTRY compound; `num` must be deadDragons.size() (was
+        // deathDelay.size(), which happened to usually match but is the wrong source of
+        // truth — deadDragons is what load() iterates).
+        tag.putInt("num", deadDragons.size());
 
         ListTag listtag = new ListTag();
 
         for (UUID uuid : deadDragons) {
             CompoundTag compoundtag = new CompoundTag();
-            tag.putUUID("uuid", uuid);
-            tag.putInt("delay", deathDelay.getOrDefault(uuid, 0));
-            tag.putString("message", deathMessages.getOrDefault(uuid, ""));
+            compoundtag.putUUID("uuid", uuid);
+            compoundtag.putInt("delay", deathDelay.getOrDefault(uuid, 0));
+            compoundtag.putString("message", deathMessages.getOrDefault(uuid, ""));
             listtag.add(compoundtag);
         }
         tag.put("deadDragons", listtag);

@@ -89,6 +89,54 @@ public class TameableDragonEntity extends AbstractDragonEntity {
     }
 
     @Override
+    public void onAddedToLevel() {
+        super.onAddedToLevel();
+
+        if (!this.level.isClientSide) {
+            reconcileEquipmentFlagsWithContainer();
+        }
+    }
+
+    /**
+     * Wave 3, cheap defense (mostly moot after Wave 2's globalized inventory store —
+     * kept as a backstop): the saddle/chest SynchedEntityData flags travel in entity
+     * NBT, but the actual container contents live in DragonWorldData's global
+     * inventory store, keyed separately by dragonUUID. If the two ever disagree — a
+     * stray legacy per-dimension entry that missed migration, a third party clearing
+     * the container without touching the dragon, hand-edited NBT — a flag stuck
+     * {@code true} makes the client keep rendering equipment (and keep the inventory
+     * unlocked) that no longer exists (upstream #98's "model shows saddle, items
+     * gone"). Trust the CONTAINER, correct the flags to match it, and log once so an
+     * operator can see it happened instead of silently living with stale flags.
+     */
+    private void reconcileEquipmentFlagsWithContainer() {
+        var inventory = getDragonInventory();
+        if (inventory == null) return;
+
+        boolean flaggedSaddled = entityData.get(saddledDataAccessor);
+        boolean actuallySaddled =
+                inventory.inventory.getItem(DragonInventory.SADDLE_SLOT).is(Items.SADDLE);
+
+        boolean flaggedChest = entityData.get(idChestDataAccessor);
+        var chestItem = inventory.inventory.getItem(DragonInventory.CHEST_SLOT);
+        boolean actuallyChested = chestItem.is(Items.CHEST) || chestItem.is(Items.ENDER_CHEST);
+
+        if (flaggedSaddled != actuallySaddled || flaggedChest != actuallyChested) {
+            DMR.LOGGER.warn(
+                    "Dragon {} equipment flags disagreed with its actual inventory contents on load"
+                            + " (saddled flag={} actual={}, chest flag={} actual={}) — correcting flags to"
+                            + " match the container.",
+                    getDragonUUID(),
+                    flaggedSaddled,
+                    actuallySaddled,
+                    flaggedChest,
+                    actuallyChested);
+
+            updateContainerEquipment();
+        }
+    }
+
+    @Override
     protected Component getTypeName() {
         if (hasVariant()) {
             return Component.translatable(
