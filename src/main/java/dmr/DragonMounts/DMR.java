@@ -32,6 +32,7 @@ import net.neoforged.fml.loading.FMLLoader;
 import net.neoforged.neoforge.client.event.RegisterColorHandlersEvent.Block;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.gametest.GameTestHooks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -100,6 +101,12 @@ public class DMR {
                 var method = clas.getMethod("registerTestFramework", IEventBus.class, ModContainer.class);
                 method.invoke(null, bus, container);
             } catch (Exception e) {
+                // CI hygiene (Wave 0): in a gametest run a broken test classpath must fail
+                // loudly — silently swallowing it here previously let zero-test CI runs
+                // report green. See .fork-notes/fix-plan.md.
+                if (GameTestHooks.isGametestEnabled()) {
+                    throw new IllegalStateException("Failed to register the test framework during a gametest run", e);
+                }
                 LOGGER.debug("Failed to register test framework.");
             }
         }

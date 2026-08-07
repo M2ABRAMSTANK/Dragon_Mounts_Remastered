@@ -71,8 +71,26 @@ public class CompleteDataSync extends AbstractMessage<CompleteDataSync> {
         return true;
     }
 
+    /**
+     * Pure routing decision for an incoming capability payload: should a payload
+     * carrying {@code payloadPlayerId} be applied to the local player
+     * {@code localPlayerId}?
+     *
+     * <p>Extracted (behavior-preserving) so the routing rule is testable outside a
+     * client. The CURRENT behavior applies every received payload to the local player,
+     * ignoring the payload's player id entirely — this is the #88/#113 cross-player
+     * whistle-binding corruption vector. Wave 4 changes this to
+     * {@code payloadPlayerId == localPlayerId} (see .fork-notes/fix-plan.md).
+     */
+    public static boolean shouldApplyToLocalPlayer(int payloadPlayerId, int localPlayerId) {
+        return true;
+    }
+
     @Override
     public void handle(IPayloadContext supplier, Player player) {
+        if (!shouldApplyToLocalPlayer(playerId, player.getId())) {
+            return;
+        }
         PlayerStateUtils.getHandler(player).deserializeNBT(player.level.registryAccess(), tag);
         player.refreshDimensions();
     }

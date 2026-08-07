@@ -176,10 +176,6 @@ idea {
     }
 }
 
-tasks.named('spotlessCheck') {
-    enabled = false
-}
-
-tasks.named('build') {
-    dependsOn tasks.named('spotlessApply')
-}
+// Wave 0 CI hygiene: spotlessCheck is enabled (builds FAIL on formatting drift instead of
+// silently rewriting sources via a build->spotlessApply hook). Run './gradlew spotlessApply'
+// locally to fix formatting. See .fork-notes/fix-plan.md.

@@ -570,15 +570,20 @@ public class DragonWhistleTests {
      * <p>
      * This test verifies that:
      * 1. A dragon can be tamed and bound to a whistle
-     * 2. When the dragon is in a different dimension, it can still be called
-     * 3. The dragon's inventory is transferred correctly between dimensions
+     * 2. When the dragon is in a different dimension, calling it TELEPORTS the same
+     * entity (identical entity UUID) instead of cloning it from the NBT snapshot
+     * 3. Exactly one dragon with the bound dragonUUID exists across ALL server levels
+     * (no orphan left behind in the source dimension)
+     * 4. The dragon arrives in the summoning player's dimension
+     * 5. The dragon's inventory is transferred correctly between dimensions
      *
      * @param helper The game test helper
      */
     @EmptyTemplate(floor = true)
-    @GameTest
+    @GameTest(required = false)
     @TestHolder
     public static void callAcrossDimensions(ExtendedGameTestHelper helper) {
+        // RED until Wave 2 — baseline clones+orphans; see .fork-notes/fix-plan.md
         var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
         player.moveToCentre();
 
@@ -586,6 +591,11 @@ public class DragonWhistleTests {
         var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
         dragon.setBreed(DragonBreedsRegistry.getDefault());
         dragon.tamedFor(player, true);
+
+        // Entity UUID survives changeDimension (restoreFrom copies it), so this is the
+        // identity the summoned dragon must still carry if it was teleported, not cloned.
+        var entityUuid = dragon.getUUID();
+        var dragonUuid = dragon.getDragonUUID();
 
         // Set dragon to whistle
         DragonWhistleHandler.setDragon(player, dragon, 0);
@@ -604,11 +614,21 @@ public class DragonWhistleTests {
             }
         }
 
-        var netherDim = helper.getLevel().getServer().getLevel(Level.NETHER);
+        var server = helper.getLevel().getServer();
+        var netherDim = server.getLevel(Level.NETHER);
+        if (netherDim == null) {
+            helper.fail("Nether level is not available");
+            return;
+        }
+
         var dimensionTransition = new DimensionTransition(
                 netherDim, new Vec3(0, 0, 0), new Vec3(0, 0, 0), 0, 0, true, DimensionTransition.DO_NOTHING);
 
         var netherDragon = (TameableDragonEntity) dragon.changeDimension(dimensionTransition);
+        if (netherDragon == null) {
+            helper.fail("changeDimension returned null when moving the dragon to the Nether");
+            return;
+        }
 
         // Give the dragon a chest with items
         netherDragon.equipChest(new ItemStack(Blocks.CHEST), SoundSource.MASTER);
@@ -620,17 +640,47 @@ public class DragonWhistleTests {
         // Verify the call was successful
         if (!callResult) {
             helper.fail("Failed to call dragon from another dimension");
+            return;
         }
 
         var checkDragon = DragonWhistleHandler.findDragon(player, 0);
 
         if (checkDragon == null) {
             helper.fail("Dragon was not found after being called from another dimension");
+            return;
+        }
+
+        // Identity: a cross-dimension summon must move the SAME entity, not clone it
+        if (!checkDragon.getUUID().equals(entityUuid)) {
+            helper.fail("Dragon was cloned instead of teleported: entity UUID changed from " + entityUuid + " to "
+                    + checkDragon.getUUID());
+            return;
+        }
+
+        // Uniqueness: exactly one dragon with this dragonUUID may exist across all levels
+        int count = 0;
+        for (var serverLevel : server.getAllLevels()) {
+            count += serverLevel
+                    .getEntities(ModEntities.DRAGON_ENTITY.get(), entity -> dragonUuid.equals(entity.getDragonUUID()))
+                    .size();
+        }
+        if (count != 1) {
+            helper.fail(
+                    "Expected exactly one dragon with dragonUUID " + dragonUuid + " across all levels, found " + count);
+            return;
+        }
+
+        // The dragon must have arrived in the player's dimension
+        if (!checkDragon.level().dimension().equals(helper.getLevel().dimension())) {
+            helper.fail("Dragon is not in the summoning player's dimension: "
+                    + checkDragon.level().dimension().location());
+            return;
         }
 
         // Verify the dragon's inventory was transferred
         if (!checkDragon.hasChest() || checkDragon.getInventory().getItem(0).isEmpty()) {
             helper.fail("Dragon's inventory was not transferred correctly between dimensions");
+            return;
         }
 
         helper.succeed();
