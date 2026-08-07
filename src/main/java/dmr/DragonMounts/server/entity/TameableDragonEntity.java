@@ -19,7 +19,6 @@ import net.minecraft.network.protocol.game.DebugPackets;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
@@ -75,9 +74,18 @@ public class TameableDragonEntity extends AbstractDragonEntity {
 
     @Override
     public boolean removeWhenFarAway(double distanceToClosestPlayer) {
-        return ((wasHatched() || this.tickCount > 2400 || isNaturalSpawn())
+        // B3: hatched dragons are player-created and must never distance-despawn.
+        // wasHatched() previously sat in the OR below, which made despawn MORE likely.
+        if (wasHatched()) {
+            return false;
+        }
+
+        // Note: the parameter is a SQUARED distance (vanilla passes distanceToSqr), so the
+        // old `> Mth.sqrt(32)` compared d^2 against ~5.7 (i.e. ~2.4 blocks). Compare
+        // squared-vs-squared for the intended 32-block threshold.
+        return ((this.tickCount > 2400 || isNaturalSpawn())
                 && !isTame()
-                && distanceToClosestPlayer > Mth.sqrt(32)
+                && distanceToClosestPlayer > 32 * 32
                 && !this.hasCustomName());
     }
 
@@ -218,22 +226,32 @@ public class TameableDragonEntity extends AbstractDragonEntity {
 
             if (owner instanceof Player player) {
                 var handler = PlayerStateUtils.getHandler(player);
-                var index = DragonWhistleHandler.getDragonSummonIndex(player, getDragonUUID());
-                handler.setDragonInstance(index, new DragonInstance(dragon));
+                var summonIndex = DragonWhistleHandler.getDragonSummonIndex(player, getDragonUUID());
 
-                // Update lastSummon to new UUID to prevent despawns
-                if (handler.lastSummons.get(index) != null
-                        && handler.lastSummons.get(index).equals(getUUID())) {
-                    handler.lastSummons.put(index, entity.getUUID());
+                // Unbound dragons have no whistle binding to update — the old .orElse(0)
+                // fallback wrote their instance into slot 0 and condemned that slot's
+                // bound dragon to the dedup check.
+                if (summonIndex.isPresent()) {
+                    var index = summonIndex.getAsInt();
+                    handler.setDragonInstance(index, new DragonInstance(dragon));
+
+                    // Update lastSummon to new UUID to prevent despawns
+                    if (handler.lastSummons.get(index) != null
+                            && handler.lastSummons.get(index).equals(getUUID())) {
+                        handler.lastSummons.put(index, entity.getUUID());
+                    }
                 }
             }
 
             var worldData1 = DragonWorldDataManager.getInstance(level);
             var worldData2 = DragonWorldDataManager.getInstance(transition.newLevel());
 
-            // Transfer the dragon inventory
-            worldData2.dragonInventories.put(getDragonUUID(), worldData1.dragonInventories.get(getDragonUUID()));
-            worldData1.dragonInventories.remove(getDragonUUID());
+            // Transfer the dragon inventory. B2: never put(uuid, null) — skip the put when
+            // the source level has no entry for this dragon.
+            var transferredInventory = worldData1.dragonInventories.remove(getDragonUUID());
+            if (transferredInventory != null) {
+                worldData2.dragonInventories.put(getDragonUUID(), transferredInventory);
+            }
 
             return dragon;
         }

@@ -37,6 +37,21 @@ public interface IMessage<T extends CustomPacketPayload> extends CustomPacketPay
     }
 
     /**
+     * Marks this message as clientbound-only (server-to-client sync packets).
+     * <p>
+     * All packets are registered playBidirectional, so without this flag a modified
+     * client can send any sync packet to the server and have its payload applied to
+     * server-side state (R1 in .fork-notes/fix-plan.md — e.g. CompleteDataSync let a
+     * client inject arbitrary capability data, including full dragon NBT). When this
+     * returns true, {@link PacketHelper} rejects and logs any serverbound delivery.
+     *
+     * @return True if the server must reject this message when received from a client
+     */
+    default boolean clientboundOnly() {
+        return false;
+    }
+
+    /**
      * Handles this message on either the client or server side.
      * <p>
      * This is the main handler method that is called when the message is received.

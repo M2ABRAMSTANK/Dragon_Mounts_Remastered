@@ -44,6 +44,15 @@ public class DragonNBTSync extends AbstractMessage<DragonNBTSync> {
         this.tag = tag != null ? tag : new CompoundTag();
     }
 
+    /**
+     * R1 (security): this packet is a server-to-client sync; serverbound deliveries are
+     * rejected and logged by PacketHelper (all packets are registered playBidirectional).
+     */
+    @Override
+    public boolean clientboundOnly() {
+        return true;
+    }
+
     @Override
     protected String getTypeName() {
         return "whistle_data_sync";

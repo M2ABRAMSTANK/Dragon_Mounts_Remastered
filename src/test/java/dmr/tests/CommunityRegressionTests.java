@@ -163,11 +163,9 @@ public class CommunityRegressionTests {
      * @param helper The game test helper
      */
     @EmptyTemplate(floor = true)
-    @GameTest(required = false)
+    @GameTest
     @TestHolder
     public static void unboundDragonSurvivesChunkReload(ExtendedGameTestHelper helper) {
-        // RED until Wave 1 — getDragonSummonIndex .orElse(0) collapses unbound dragons onto
-        // whistle slot 0; see .fork-notes/fix-plan.md
         var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
         player.moveToCentre();
 
@@ -339,11 +337,12 @@ public class CommunityRegressionTests {
      * @param helper The game test helper
      */
     @EmptyTemplate(floor = true)
-    @GameTest(required = false)
+    @GameTest
     @TestHolder
     public static void chestInventorySurvivesTwoCrossDimensionSummons(ExtendedGameTestHelper helper) {
-        // RED until Wave 2 — stale DragonInstance.dimension + duplicated inventory hand-off
-        // blocks null-clobber the inventory (B1); see .fork-notes/fix-plan.md
+        // Went green in Wave 1: the B2 null-put fix (skip put(uuid, null) in both inventory
+        // hand-off blocks) removed this scenario's clobber vector ahead of the Wave 2
+        // hand-off consolidation (B1). Kept required as the B1 regression net.
         var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
         player.moveToCentre();
 

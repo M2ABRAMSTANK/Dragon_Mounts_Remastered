@@ -166,6 +166,10 @@ abstract class DragonBreedComponent extends DragonBreathComponent {
             compound.putString(NBTConstants.VARIANT, getEntityData().get(variantDataAccessor));
         }
         compound.putBoolean("breedIsSet", breedIsSet);
+
+        // WAS_HATCHED was defined but never persisted, so hatched status silently reset
+        // to false on every reload (feeding removeWhenFarAway despawns, upstream #64/#124).
+        compound.putBoolean(NBTConstants.WAS_HATCHED, wasHatched());
     }
 
     /** Loads breed-related data from NBT. */
@@ -190,6 +194,12 @@ abstract class DragonBreedComponent extends DragonBreathComponent {
 
         if (compound.contains("breedIsSet")) {
             breedIsSet = compound.getBoolean("breedIsSet");
+        }
+
+        // contains()-guarded: older saves without the tag keep the synched default (false),
+        // so this is not a required NBT field (save-data compat invariant).
+        if (compound.contains(NBTConstants.WAS_HATCHED)) {
+            setHatched(compound.getBoolean(NBTConstants.WAS_HATCHED));
         }
     }
 

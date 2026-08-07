@@ -169,6 +169,7 @@ public class DragonOwnerCapability implements INBTSerializable<CompoundTag> {
 
         dragonsHatched = base.getInt("dragonsHatched");
 
+        lastSummons.clear();
         respawnDelays.clear();
         dragonNBTs.clear();
         dragonInstances.clear();
@@ -194,12 +195,19 @@ public class DragonOwnerCapability implements INBTSerializable<CompoundTag> {
                 dragonNBTs.put(color.getId(), base.getCompound("dragonNBT_" + color.getId()));
             }
 
-            // Legacy support for dragonUUID, remove in future versions
+            // Legacy support for dragonUUID, remove in future versions.
+            // Must be .location().toString(): ResourceKey.toString() produces
+            // "ResourceKey[minecraft:dimension / minecraft:overworld]", which later
+            // crashes ResourceLocation.parse in findDragon/callDragon for legacy players.
             if (base.contains("dragonUUID_" + color.getId())) {
                 var id = base.getUUID("dragonUUID_" + color.getId());
                 var instance = new DragonInstance(
                         getPlayerInstance() != null
-                                ? getPlayerInstance().level.dimension().toString()
+                                ? getPlayerInstance()
+                                        .level
+                                        .dimension()
+                                        .location()
+                                        .toString()
                                 : "minecraft:overworld",
                         UUID.randomUUID(),
                         id);

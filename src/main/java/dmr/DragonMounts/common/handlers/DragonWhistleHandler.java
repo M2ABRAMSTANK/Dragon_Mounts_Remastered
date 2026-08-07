@@ -17,6 +17,7 @@ import dmr.DragonMounts.server.worlddata.DragonWorldDataManager;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -133,15 +134,24 @@ public class DragonWhistleHandler {
         return whistleItem != null ? whistleItem.getColor().getId() : -1;
     }
 
-    public static int getDragonSummonIndex(Player player, UUID dragonUUID) {
+    /**
+     * Finds the whistle slot a dragon (by dragonUUID) is bound to.
+     *
+     * <p>
+     * Returns an empty OptionalInt for UNBOUND dragons. The previous {@code .orElse(0)}
+     * fallback collapsed every owned-but-unbound dragon onto whistle slot 0, which made
+     * the EntityJoinLevelEvent dedup check delete them on chunk load (upstream #64/#124;
+     * defect 2 in .fork-notes/code-investigation.md). Callers MUST bail on empty.
+     */
+    public static OptionalInt getDragonSummonIndex(Player player, UUID dragonUUID) {
         var handler = PlayerStateUtils.getHandler(player);
 
         return handler.dragonInstances.entrySet().stream()
-                .filter(entry ->
-                        entry.getValue() != null && entry.getValue().UUID.equals(dragonUUID))
-                .map(Entry::getKey)
-                .findFirst()
-                .orElse(0);
+                .filter(entry -> entry.getValue() != null
+                        && entry.getValue().UUID != null
+                        && entry.getValue().UUID.equals(dragonUUID))
+                .mapToInt(Entry::getKey)
+                .findFirst();
     }
 
     public static void setDragon(Player player, TameableDragonEntity dragon, int index) {
@@ -280,10 +290,13 @@ public class DragonWhistleHandler {
                     var worldData1 = DragonWorldDataManager.getInstance(level);
                     var worldData2 = DragonWorldDataManager.getInstance(player.level);
 
-                    // Transfer the dragon inventory
-                    worldData2.dragonInventories.put(
-                            instance.getUUID(), worldData1.dragonInventories.get(instance.getUUID()));
-                    worldData1.dragonInventories.remove(instance.getUUID());
+                    // Transfer the dragon inventory. B2: never put(uuid, null) — a missing
+                    // source entry used to insert a null value into dragonInventories, which
+                    // both loses items and feeds the isDirty() NPE on world save.
+                    var transferredInventory = worldData1.dragonInventories.remove(instance.getUUID());
+                    if (transferredInventory != null) {
+                        worldData2.dragonInventories.put(instance.getUUID(), transferredInventory);
+                    }
 
                     DMR.LOGGER.debug(
                             "Transferring dragon inventory from {} to {}",

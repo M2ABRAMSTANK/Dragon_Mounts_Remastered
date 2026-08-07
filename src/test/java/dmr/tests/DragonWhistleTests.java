@@ -810,15 +810,15 @@ public class DragonWhistleTests {
             helper.fail("Dragon2 was not bound to whistle");
         }
 
-        // Verify correct whistle indices
-        int index1 = DragonWhistleHandler.getDragonSummonIndex(player, dragon1.getDragonUUID());
-        int index2 = DragonWhistleHandler.getDragonSummonIndex(player, dragon2.getDragonUUID());
+        // Verify correct whistle indices (empty OptionalInt = not bound at all)
+        var index1 = DragonWhistleHandler.getDragonSummonIndex(player, dragon1.getDragonUUID());
+        var index2 = DragonWhistleHandler.getDragonSummonIndex(player, dragon2.getDragonUUID());
 
-        if (index1 != 0) {
+        if (index1.isEmpty() || index1.getAsInt() != 0) {
             helper.fail("Dragon1 was bound to wrong whistle index: " + index1);
         }
 
-        if (index2 != 1) {
+        if (index2.isEmpty() || index2.getAsInt() != 1) {
             helper.fail("Dragon2 was bound to wrong whistle index: " + index2);
         }
 

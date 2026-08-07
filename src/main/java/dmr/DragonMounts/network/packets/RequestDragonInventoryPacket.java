@@ -49,6 +49,15 @@ public class RequestDragonInventoryPacket extends AbstractMessage<RequestDragonI
         this.tag = tag;
     }
 
+    /**
+     * R1 (security): this packet is a server-to-client sync; serverbound deliveries are
+     * rejected and logged by PacketHelper (all packets are registered playBidirectional).
+     */
+    @Override
+    public boolean clientboundOnly() {
+        return true;
+    }
+
     @Override
     protected String getTypeName() {
         return "request_dragon_inventory";

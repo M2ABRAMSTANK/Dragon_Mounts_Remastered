@@ -79,11 +79,19 @@ abstract class DragonOwnershipComponent extends DragonMovementComponent {
             var handler = player.getData(ModCapabilities.PLAYER_CAPABILITY);
 
             if (handler.isBoundToWhistle(getDragon())) {
+                var summonIndex = DragonWhistleHandler.getDragonSummonIndex(
+                        player, getDragon().getDragonUUID());
+
+                // isBoundToWhistle and getDragonSummonIndex use the same dragonUUID
+                // predicate, so a bound dragon always resolves an index; the emptiness
+                // check is a defensive bail so an unbound dragon can never be written
+                // into slot 0 (the old .orElse(0) landmine).
+                if (summonIndex.isEmpty()) {
+                    return;
+                }
+
                 handler.setPlayerInstance(player);
-                handler.setDragonToWhistle(
-                        getDragon(),
-                        DragonWhistleHandler.getDragonSummonIndex(
-                                player, getDragon().getDragonUUID()));
+                handler.setDragonToWhistle(getDragon(), summonIndex.getAsInt());
             } else {
                 DragonWorldDataManager.addDragonHistory(getDragon());
             }

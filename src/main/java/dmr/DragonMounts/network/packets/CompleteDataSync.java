@@ -72,6 +72,17 @@ public class CompleteDataSync extends AbstractMessage<CompleteDataSync> {
     }
 
     /**
+     * R1 (security): CompleteDataSync is a server-to-client capability sync. autoSync +
+     * playBidirectional meant a modified client could send one serverbound and inject
+     * arbitrary capability data (including full dragon NBT snapshots) that was then
+     * rebroadcast to nearby clients. PacketHelper rejects and logs serverbound deliveries.
+     */
+    @Override
+    public boolean clientboundOnly() {
+        return true;
+    }
+
+    /**
      * Pure routing decision for an incoming capability payload: should a payload
      * carrying {@code payloadPlayerId} be applied to the local player
      * {@code localPlayerId}?

@@ -185,6 +185,12 @@ public class DMREggBlockEntity extends BlockEntity {
 
         baby.setHatched(true);
 
+        // B3: use the vanilla persistence flag (serializes as PersistenceRequired, no new
+        // NBT fields) so hatched dragons never despawn naturally, even before taming.
+        if (ServerConfig.PERSIST_HATCHED_DRAGONS) {
+            baby.setPersistenceRequired();
+        }
+
         if (ServerConfig.ENABLE_RANDOM_STATS) {
             baby.setHatchedAttributes(this);
         }

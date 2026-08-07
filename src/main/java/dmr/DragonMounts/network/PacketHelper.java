@@ -148,15 +148,32 @@ public class PacketHelper {
             var player = context.player();
             if (player == null) return;
 
-            message.handle(context, player);
-
-            if (player instanceof ServerPlayer serverPlayer) {
-                message.handleServer(context, serverPlayer);
+            // R1 (security): clientbound-only sync packets must never be applied when a
+            // client sends them to the server — a modified client could otherwise inject
+            // arbitrary server-side state (e.g. CompleteDataSync capability payloads).
+            if (message.clientboundOnly()) {
+                DMR.LOGGER.warn(
+                        "Rejected serverbound {} packet from {} ({}): this packet is clientbound-only"
+                                + " and was likely sent by a modified client",
+                        message.type().id(),
+                        player.getName().getString(),
+                        player.getUUID());
+                return;
             }
 
-            if (message.autoSync()) {
-                PacketDistributor.sendToPlayersTrackingEntityAndSelf(player, message);
-            }
+            // R2: serverbound handlers previously ran directly on the netty thread;
+            // enqueueWork moves them onto the main server thread like the clientbound branch.
+            context.enqueueWork(() -> {
+                message.handle(context, player);
+
+                if (player instanceof ServerPlayer serverPlayer) {
+                    message.handleServer(context, serverPlayer);
+                }
+
+                if (message.autoSync()) {
+                    PacketDistributor.sendToPlayersTrackingEntityAndSelf(player, message);
+                }
+            });
         }
     }
 

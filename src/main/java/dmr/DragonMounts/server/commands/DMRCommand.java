@@ -12,7 +12,11 @@ import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.worlddata.DragonWorldData.DragonHistory;
 import dmr.DragonMounts.server.worlddata.DragonWorldDataManager;
 import dmr.DragonMounts.util.PlayerStateUtils;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -121,6 +125,12 @@ public class DMRCommand {
                                         context.getArgument("id", UUID.class),
                                         Vec3Argument.getVec3(context, "pos"))))));
 
+        // Wave 1 (advisor B4): read-only diagnostic listing live same-dragonUUID entity
+        // sets across ALL server levels, so operators can triage duplicates themselves
+        // instead of any automatic removal. Inherits the base command's permission (2).
+        var duplicates = baseCommand.then(
+                Commands.literal("duplicates").executes(context -> runDuplicates(context.getSource())));
+
         var clearWhistle = baseCommand.then(Commands.literal("clear_whistle")
                 .then(Commands.argument("color", StringArgumentType.string())
                         .suggests((context, builder) -> {
@@ -136,7 +146,61 @@ public class DMRCommand {
         commandDispatcher.register(spawnRegular);
         commandDispatcher.register(spawnHybrid);
         commandDispatcher.register(recall);
+        commandDispatcher.register(duplicates);
         commandDispatcher.register(clearWhistle);
+    }
+
+    /**
+     * Lists every set of live dragon entities sharing one dragonUUID across all levels:
+     * dragonUUID, owner name/UUID, and each entity's UUID + dimension + position.
+     */
+    private static int runDuplicates(CommandSourceStack source) {
+        var server = source.getServer();
+
+        Map<UUID, List<TameableDragonEntity>> byDragonUUID = new HashMap<>();
+        for (ServerLevel level : server.getAllLevels()) {
+            for (TameableDragonEntity dragon :
+                    level.getEntities(ModEntities.DRAGON_ENTITY.get(), entity -> entity.getDragonUUID() != null)) {
+                byDragonUUID
+                        .computeIfAbsent(dragon.getDragonUUID(), key -> new ArrayList<>())
+                        .add(dragon);
+            }
+        }
+
+        var duplicateSets = byDragonUUID.entrySet().stream()
+                .filter(entry -> entry.getValue().size() > 1)
+                .toList();
+
+        if (duplicateSets.isEmpty()) {
+            source.sendSuccess(
+                    () -> Component.literal("No duplicate dragons found (by dragonUUID) in loaded chunks."), false);
+            return 0;
+        }
+
+        for (var entry : duplicateSets) {
+            var dragons = entry.getValue();
+            var ownerUUID = dragons.getFirst().getOwnerUUID();
+            var ownerPlayer = ownerUUID != null ? server.getPlayerList().getPlayer(ownerUUID) : null;
+            var ownerName = ownerPlayer != null ? ownerPlayer.getGameProfile().getName() : "offline/unknown";
+
+            var header = String.format(
+                    "dragonUUID %s — owner %s (%s) — %d live entities:",
+                    entry.getKey(), ownerName, ownerUUID != null ? ownerUUID : "none", dragons.size());
+            source.sendSuccess(() -> Component.literal(header).withStyle(ChatFormatting.GOLD), false);
+
+            for (TameableDragonEntity dragon : dragons) {
+                var line = String.format(
+                        "  entity %s in %s at (%.1f, %.1f, %.1f)",
+                        dragon.getUUID(),
+                        dragon.level().dimension().location(),
+                        dragon.getX(),
+                        dragon.getY(),
+                        dragon.getZ());
+                source.sendSuccess(() -> Component.literal(line), false);
+            }
+        }
+
+        return duplicateSets.size();
     }
 
     private static String getTimeAgo(long timestampMs) {

@@ -55,18 +55,47 @@ public class DragonWhistleEvent {
             if (event.getEntity() instanceof TameableDragonEntity dragon) {
                 if (dragon.getOwner() != null && dragon.getOwner() instanceof Player player) {
                     var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
-                    var index = DragonWhistleHandler.getDragonSummonIndex(player, dragon.getDragonUUID());
 
-                    if (cap.lastSummons != null && !cap.lastSummons.isEmpty()) {
-                        if (cap.lastSummons.containsKey(index)
-                                && !cap.lastSummons.get(index).equals(dragon.getUUID())) {
-                            DMR.LOGGER.debug(
-                                    "Preventing loading of dragon in {}, last entity id mismatch. Expected: {}, got: {}",
-                                    event.getLevel().dimension().location(),
-                                    cap.lastSummons.get(index),
-                                    dragon.getDragonUUID());
-                            event.setCanceled(true);
-                            return;
+                    // The dedup check is keyed on the dragon's whistle binding (derived from
+                    // dragonUUID). An empty result means the dragon is NOT bound to any
+                    // whistle — unbound dragons must never be dedup-checked (the old
+                    // .orElse(0) fallback collapsed them onto slot 0 and deleted them on
+                    // chunk load; upstream #64/#124).
+                    var summonIndex = DragonWhistleHandler.getDragonSummonIndex(player, dragon.getDragonUUID());
+
+                    if (summonIndex.isPresent() && cap.lastSummons != null) {
+                        var index = summonIndex.getAsInt();
+                        var expectedEntityId = cap.lastSummons.get(index);
+
+                        if (expectedEntityId != null && !expectedEntityId.equals(dragon.getUUID())) {
+                            var resolution = ServerConfig.DUPLICATE_RESOLUTION;
+                            var boundInstance = cap.dragonInstances.get(index);
+
+                            if (resolution != ServerConfig.DuplicateResolution.OFF) {
+                                DMR.LOGGER.warn(
+                                        "Duplicate dragon detected (resolution={}): dragonUUID={}, owner={} ({}),"
+                                                + " expected entity {} (last known dimension {}), joining entity {}"
+                                                + " in {} at ({}, {}, {})",
+                                        resolution,
+                                        dragon.getDragonUUID(),
+                                        player.getName().getString(),
+                                        player.getUUID(),
+                                        expectedEntityId,
+                                        boundInstance != null ? boundInstance.getDimension() : "unknown",
+                                        dragon.getUUID(),
+                                        event.getLevel().dimension().location(),
+                                        dragon.getX(),
+                                        dragon.getY(),
+                                        dragon.getZ());
+                            }
+
+                            if (resolution == ServerConfig.DuplicateResolution.AGGRESSIVE) {
+                                // Cancelling the join event is the only removal mechanism
+                                // permitted here — never remove/discard an entity from inside
+                                // EntityJoinLevelEvent (CME/ghost-entity risk, advisor B4).
+                                event.setCanceled(true);
+                                return;
+                            }
                         }
                     }
                 }
@@ -157,7 +186,14 @@ public class DragonWhistleEvent {
                     // that, just let vanilla send the message when player is online
                     player.displayClientMessage(mes, false);
 
-                    var index = DragonWhistleHandler.getDragonSummonIndex(player, dragon.getDragonUUID());
+                    var summonIndex = DragonWhistleHandler.getDragonSummonIndex(player, dragon.getDragonUUID());
+
+                    // An unbound dragon has no whistle state to clean up — bail instead of
+                    // clobbering slot 0 (the old .orElse(0) landmine).
+                    if (summonIndex.isEmpty()) {
+                        return;
+                    }
+                    var index = summonIndex.getAsInt();
 
                     if (!ServerConfig.ALLOW_RESPAWN) {
                         var state = player.getData(ModCapabilities.PLAYER_CAPABILITY);

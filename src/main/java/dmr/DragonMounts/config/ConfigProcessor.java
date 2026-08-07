@@ -88,6 +88,13 @@ public class ConfigProcessor {
                 configValue = builder.defineInRange(key, (Double) defaultValue, min, max);
             } else if (fieldType == String.class) {
                 configValue = builder.define(key, (String) defaultValue);
+            } else if (fieldType.isEnum()) {
+                // Enum support (community fork, Wave 1): needed for [whistle]
+                // duplicate_resolution. Serialized to TOML as the constant name;
+                // updateFieldValues round-trips it unchanged.
+                @SuppressWarnings({"unchecked", "rawtypes"})
+                ModConfigSpec.ConfigValue<?> enumValue = builder.defineEnum(key, (Enum) defaultValue);
+                configValue = enumValue;
             } else {
                 throw new IllegalArgumentException("Unsupported config field type: " + fieldType.getName());
             }

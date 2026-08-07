@@ -102,6 +102,15 @@ public class DragonBreathTargetSyncPacket extends AbstractMessage<DragonBreathTa
         this.pos = pos;
     }
 
+    /**
+     * R1 (security): this packet is a server-to-client sync; serverbound deliveries are
+     * rejected and logged by PacketHelper (all packets are registered playBidirectional).
+     */
+    @Override
+    public boolean clientboundOnly() {
+        return true;
+    }
+
     @Override
     protected String getTypeName() {
         return "dragon_breath_target_sync";

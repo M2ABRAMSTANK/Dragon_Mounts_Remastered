@@ -161,6 +161,30 @@ public class ServerConfig {
     @RangeConstraint(min = 0, max = Integer.MAX_VALUE)
     public static int RESPAWN_TIME = 60;
 
+    /**
+     * How the EntityJoinLevelEvent duplicate-dragon guard reacts when a whistle-bound
+     * dragon loads with an entity UUID that does not match the binding's lastSummons
+     * entry (community fork, Wave 1; advisor ruling B4).
+     */
+    public enum DuplicateResolution {
+        /** Never cancel loading, never log — the pre-1.9.x disable_duplicate_prevention behavior. */
+        OFF,
+        /** Never cancel loading; log each detection loudly for operator triage. */
+        LOG,
+        /** Cancel loading of the mismatched entity (1.9.2 behavior) — with the loud log added. */
+        AGGRESSIVE
+    }
+
+    @Config(
+            key = "duplicate_resolution",
+            comment = {
+                "How to handle a whistle-bound dragon loading with a mismatched entity id (possible duplicate).",
+                "OFF = never cancel loading. LOG = never cancel, log each detection.",
+                "AGGRESSIVE = cancel loading of the mismatched entity (may DELETE the original dragon if the binding is stale)."
+            },
+            category = "whistle")
+    public static DuplicateResolution DUPLICATE_RESOLUTION = DuplicateResolution.AGGRESSIVE;
+
     @Config(
             key = "dragon_egg_spawn_chance",
             comment =
@@ -183,6 +207,15 @@ public class ServerConfig {
             category = "behavior")
     @RangeConstraint(min = 2, max = 64)
     public static int MAX_FOLLOW_DISTANCE = 8;
+
+    @Config(
+            key = "persist_hatched_dragons",
+            comment = {
+                "Mark hatched dragons as persistence-required so they never despawn naturally,",
+                "even before being tamed (upstream #64/#90/#124: untamed hatched dragons despawning)."
+            },
+            category = "behavior")
+    public static boolean PERSIST_HATCHED_DRAGONS = true;
 
     // Initialize the config
     static {

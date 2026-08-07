@@ -51,7 +51,11 @@ public class DragonWorldData extends SavedData {
 
     @Override
     public boolean isDirty() {
-        return super.isDirty() || dragonInventories.values().stream().anyMatch(DragonInventory::isDirty);
+        // B2: dragonInventories has historically held null values (the inventory hand-off
+        // blocks used to put(uuid, null)); a method-reference stream here NPE'd on world
+        // save. The null-put vectors are fixed, but stay defensive against old saves.
+        return super.isDirty()
+                || dragonInventories.values().stream().anyMatch(inventory -> inventory != null && inventory.isDirty());
     }
 
     public static DragonWorldData load(CompoundTag nbt, Provider provider) {
