@@ -7,9 +7,11 @@ config = "${mod_id}.mixins.json"
 
 [[mods]]
 modId = "${mod_id}"
-displayName = "${mod_name}"
+displayName = "${mod_name} (Community Fork)"
 version = "${mod_version}"
-authors = "${mod_authors}"
+# ${mod_authors} = upstream credit (gradle.properties), kept as-is; fork maintenance is
+# appended here rather than overwriting the property, so upstream authorship stays intact.
+authors = "${mod_authors}, Community fork maintenance"
 description = '''${mod_description}'''
 
 [[dependencies.${ mod_id }]]
