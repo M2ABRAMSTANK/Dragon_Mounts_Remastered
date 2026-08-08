@@ -53,11 +53,16 @@ public class DragonAttackPacket extends AbstractMessage<DragonAttackPacket> {
         return STREAM_CODEC;
     }
 
+    /**
+     * Wave-1 audit (deferred to Wave 4): the dragon id is client-supplied and
+     * unverified — require the sender own the dragon before triggering an attack on
+     * its behalf.
+     */
     @Override
     public void handle(IPayloadContext context, Player player) {
         var entity = player.level.getEntity(entityId);
 
-        if (entity instanceof TameableDragonEntity dragon) {
+        if (entity instanceof TameableDragonEntity dragon && dragon.isTamedFor(player)) {
             dragon.swing(InteractionHand.MAIN_HAND);
             dragon.triggerAnim("head-controller", "bite");
 

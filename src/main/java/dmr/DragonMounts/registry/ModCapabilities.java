@@ -6,7 +6,6 @@ import dmr.DragonMounts.common.capability.DragonOwnerCapability;
 import dmr.DragonMounts.network.packets.CompleteDataSync;
 import java.util.function.Supplier;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -35,9 +34,17 @@ public class ModCapabilities {
         syncCapability(player);
     }
 
+    /**
+     * Wave 4: send the capability payload only to its owner via {@code sendToPlayer}
+     * (not the tracking broadcast). Nothing client-side consumes another player's
+     * capability, so broadcasting it wasted a 16-slot NBT payload on every tracking
+     * client and leaked that data to bystanders. Matches the other CompleteDataSync
+     * senders (DMRCommand, DragonWhistleItem, DragonWhistleEvent, DragonWhistleHandler,
+     * PlayerJoinWorld).
+     */
     public static void syncCapability(Player player) {
         // player.reviveCaps();
-        PacketDistributor.sendToPlayersTrackingEntity(player, new CompleteDataSync(player));
+        PacketDistributor.sendToPlayer((ServerPlayer) player, new CompleteDataSync(player));
     }
 
     @SubscribeEvent
@@ -52,19 +59,5 @@ public class ModCapabilities {
         Player player = event.getEntity();
         player.getData(PLAYER_CAPABILITY).setPlayerInstance(player);
         syncCapability(player);
-    }
-
-    @SubscribeEvent
-    public static void onTrackingStart(PlayerEvent.StartTracking startTracking) {
-        Player trackingPlayer = startTracking.getEntity();
-        if (trackingPlayer instanceof ServerPlayer target) {
-            Entity tracked = startTracking.getTarget();
-            if (tracked instanceof ServerPlayer) {
-                var handler = tracked.getData(PLAYER_CAPABILITY);
-                PacketDistributor.sendToPlayer(
-                        target,
-                        new CompleteDataSync(tracked.getId(), handler.serializeNBT(tracked.level.registryAccess())));
-            }
-        }
     }
 }

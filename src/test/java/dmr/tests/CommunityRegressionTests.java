@@ -468,11 +468,9 @@ public class CommunityRegressionTests {
      * @param helper The game test helper
      */
     @EmptyTemplate
-    @GameTest(required = false)
+    @GameTest
     @TestHolder
     public static void completeDataSyncDropsForeignPayloads(ExtendedGameTestHelper helper) {
-        // RED until Wave 4 — the predicate currently mirrors baseline behavior (always
-        // apply); see .fork-notes/fix-plan.md
         if (!CompleteDataSync.shouldApplyToLocalPlayer(42, 42)) {
             helper.fail("Payload addressed to the local player must be applied");
             return;

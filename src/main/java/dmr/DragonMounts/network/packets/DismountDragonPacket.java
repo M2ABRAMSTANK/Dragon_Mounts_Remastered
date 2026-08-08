@@ -62,17 +62,22 @@ public class DismountDragonPacket extends AbstractMessage<DismountDragonPacket> 
         return true;
     }
 
+    /**
+     * Wave-1 audit (deferred to Wave 4): {@code entityId} is client-supplied and was
+     * unverified — a modified client could pass ANY player's entity id and force them
+     * to dismount their dragon. Legitimate senders (EntityDismountMixin,
+     * KeyInputHandler) always send their own id, so require the target be the sender.
+     */
     public void handle(IPayloadContext supplier, Player player) {
-        var level = player.level;
-        var entity = level.getEntity(entityId);
+        if (entityId != player.getId()) {
+            return;
+        }
 
-        if (entity instanceof Player player1) {
-            DragonOwnerCapability cap = player1.getData(ModCapabilities.PLAYER_CAPABILITY);
-            cap.shouldDismount = state;
+        DragonOwnerCapability cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.shouldDismount = state;
 
-            if (state) {
-                player1.stopRiding();
-            }
+        if (state) {
+            player.stopRiding();
         }
     }
 }

@@ -87,14 +87,15 @@ public class CompleteDataSync extends AbstractMessage<CompleteDataSync> {
      * carrying {@code payloadPlayerId} be applied to the local player
      * {@code localPlayerId}?
      *
-     * <p>Extracted (behavior-preserving) so the routing rule is testable outside a
-     * client. The CURRENT behavior applies every received payload to the local player,
-     * ignoring the payload's player id entirely — this is the #88/#113 cross-player
-     * whistle-binding corruption vector. Wave 4 changes this to
-     * {@code payloadPlayerId == localPlayerId} (see .fork-notes/fix-plan.md).
+     * <p>Extracted (behavior-preserving extraction, now corrected) so the routing rule is
+     * testable outside a client. Wave 4: apply the payload only when it is addressed to
+     * the local player; foreign payloads are DROPPED. This closes the #88/#113
+     * cross-player whistle-binding corruption vector — nothing client-side consumes
+     * another player's capability, so a dropped foreign payload is a no-op, not a
+     * regression. {@code playerId} is an entity id (int), not a UUID.
      */
     public static boolean shouldApplyToLocalPlayer(int payloadPlayerId, int localPlayerId) {
-        return true;
+        return payloadPlayerId == localPlayerId;
     }
 
     @Override

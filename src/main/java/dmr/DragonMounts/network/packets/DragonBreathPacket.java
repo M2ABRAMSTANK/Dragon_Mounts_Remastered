@@ -52,12 +52,17 @@ public class DragonBreathPacket extends AbstractMessage<DragonBreathPacket> {
         return STREAM_CODEC;
     }
 
+    /**
+     * Wave-1 audit (deferred to Wave 4): the dragon id is client-supplied and
+     * unverified — require the sender own the dragon before triggering a breath
+     * attack on its behalf.
+     */
     @Override
     public void handle(IPayloadContext context, Player player) {
         var level = player.level;
         var entity = player.level.getEntity(entityId);
 
-        if (entity instanceof TameableDragonEntity dragon) {
+        if (entity instanceof TameableDragonEntity dragon && dragon.isTamedFor(player)) {
             Vec3 eyePos = player.getEyePosition();
             Vec3 lookVector = player.getLookAngle();
             Vec3 targetPos = eyePos.add(lookVector.scale(10));

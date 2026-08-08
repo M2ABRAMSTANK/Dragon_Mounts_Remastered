@@ -60,11 +60,19 @@ public class DragonStatePacket extends AbstractMessage<DragonStatePacket> {
         return true;
     }
 
+    /**
+     * Wave-1 audit (deferred to Wave 4): the dragon id is client-supplied and
+     * unverified — without an ownership check, any client can sit/follow/wander ANY
+     * dragon by guessing its entity id. Require the sender own (or be tamed-for) the
+     * dragon before applying the state change.
+     */
     public void handle(IPayloadContext supplier, Player player) {
         var level = player.level;
         var entity = level.getEntity(getEntityId());
 
-        if (entity instanceof TameableDragonEntity dragon && dragon.getControllingPassenger() == null) {
+        if (entity instanceof TameableDragonEntity dragon
+                && dragon.isTamedFor(player)
+                && dragon.getControllingPassenger() == null) {
             switch (getState()) {
                 case 0 -> { // Sit
                     dragon.setWanderTarget(Optional.empty());
