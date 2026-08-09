@@ -2,14 +2,19 @@ package dmr.tests;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dmr.DragonMounts.ModConstants.DragonConstants;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler.DragonInstance;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler.SnapshotRespawnDecision;
 import java.util.List;
 import java.util.UUID;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.ChunkPos;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Plain JUnit unit tests (Wave 5) for the pure decision logic extracted out of {@link
@@ -100,5 +105,74 @@ public class DragonWhistleHandlerLogicTests {
         var instance = new DragonInstance((String) null, UUID.randomUUID(), UUID.randomUUID());
 
         assertNull(DragonWhistleHandler.resolveStoredLevel(null, instance));
+    }
+
+    /**
+     * Test (iv) (Wave 5 review HIGH-3): {@code searchBoxChunks} must mirror vanilla
+     * {@code EntitySectionStorage}'s query-AABB inflation ({@code aabb.inflate(2.0)}
+     * before sectioning) exactly, or the honest gate would certify a chunk ring as
+     * "loaded" that the widened-radius scan can actually read entities out of. Checked
+     * at EVERY x/z-mod-16 offset (not just the four named in the review — {2, 3, 12,
+     * 13} — since the bug is symmetric on both axes and this is cheap to run
+     * exhaustively) by comparing against the same inflate-then-floor-divide formula
+     * vanilla's section sweep uses.
+     */
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
+    void searchBoxChunksMatchesVanillaInflatedSweep(int mod16) {
+        // Center comfortably away from 0 so x - reach stays negative for small mod16
+        // values too (exercises the floor-division-of-negatives edge case).
+        int base = 512;
+        BlockPos center = new BlockPos(base + mod16, 70, base + mod16);
+
+        double reach = DragonConstants.DRAGON_SEARCH_RADIUS / 2.0 + DragonWhistleHandler.SEARCH_BOX_INFLATION_BLOCKS;
+        int expectedMinChunk = Math.floorDiv((int) Math.floor(center.getX() - reach), 16);
+        int expectedMaxChunk = Math.floorDiv((int) Math.floor(center.getX() + reach), 16);
+
+        var chunks = DragonWhistleHandler.searchBoxChunks(center);
+
+        assertTrue(
+                chunks.contains(new ChunkPos(expectedMinChunk, expectedMinChunk)),
+                "searchBoxChunks at x/z mod16=" + mod16 + " is missing the vanilla-inflated MIN chunk "
+                        + expectedMinChunk);
+        assertTrue(
+                chunks.contains(new ChunkPos(expectedMaxChunk, expectedMaxChunk)),
+                "searchBoxChunks at x/z mod16=" + mod16 + " is missing the vanilla-inflated MAX chunk "
+                        + expectedMaxChunk);
+        assertTrue(
+                !chunks.contains(new ChunkPos(expectedMinChunk - 1, expectedMinChunk - 1)),
+                "searchBoxChunks at x/z mod16=" + mod16 + " over-covers past the vanilla-inflated MIN chunk");
+        assertTrue(
+                !chunks.contains(new ChunkPos(expectedMaxChunk + 1, expectedMaxChunk + 1)),
+                "searchBoxChunks at x/z mod16=" + mod16 + " over-covers past the vanilla-inflated MAX chunk");
+    }
+
+    /**
+     * Test (iv): couples {@code SUMMON_CHUNK_TICKET_RADIUS} to {@code
+     * searchBoxChunks}'s actual output so a future {@code DRAGON_SEARCH_RADIUS} (or
+     * inflation) change that outgrows the ticket radius fails HERE instead of silently
+     * reopening the B1/B2 gap (a chunk the honest gate requires loaded, but the region
+     * ticket never actually held open). Exhaustive over every x/z-mod-16 offset —
+     * cheap, and the whole point is "worst case", not "typical case".
+     */
+    @Test
+    void ticketRadiusCoversWorstCaseSearchBox() {
+        int base = 512;
+        for (int xMod = 0; xMod < 16; xMod++) {
+            for (int zMod = 0; zMod < 16; zMod++) {
+                BlockPos lastPos = new BlockPos(base + xMod, 70, base + zMod);
+                ChunkPos centerChunk = new ChunkPos(lastPos);
+
+                for (ChunkPos required : DragonWhistleHandler.searchBoxChunks(lastPos)) {
+                    int dx = Math.abs(required.x - centerChunk.x);
+                    int dz = Math.abs(required.z - centerChunk.z);
+                    assertTrue(
+                            Math.max(dx, dz) <= DragonWhistleHandler.SUMMON_CHUNK_TICKET_RADIUS,
+                            "chunk " + required + " required entity-loaded by searchBoxChunks at lastPos " + lastPos
+                                    + " (chunk " + centerChunk + ") exceeds SUMMON_CHUNK_TICKET_RADIUS="
+                                    + DragonWhistleHandler.SUMMON_CHUNK_TICKET_RADIUS);
+                }
+            }
+        }
     }
 }

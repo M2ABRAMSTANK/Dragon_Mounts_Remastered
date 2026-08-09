@@ -58,6 +58,21 @@ public class TameableDragonEntity extends AbstractDragonEntity {
     @Setter
     private boolean respawnedFromSnapshot = false;
 
+    /**
+     * Wave 5 review Blocker 1(b): the server game time ({@code Level#getGameTime()})
+     * at which this entity was minted with {@link #respawnedFromSnapshot} set. Only
+     * meaningful when that flag is true; {@code -1} means unset (never minted as a
+     * snapshot clone, or legacy data written before this field existed).
+     * {@code DragonWhistleHandler#maybeReclaimSnapshotClone}/{@code
+     * processPendingReclaims} only trust the provenance flag as clone-proof within a
+     * bounded window of this timestamp — see {@code
+     * DragonWhistleHandler#SNAPSHOT_CLONE_EVIDENCE_WINDOW_TICKS} for why an unbounded
+     * flag is itself a duplication bug (it would let a long-lived, legitimately-played
+     * clone get silently discarded by an unrelated later race).
+     */
+    @Setter
+    private long snapshotMintGameTime = -1L;
+
     public TameableDragonEntity(EntityType<? extends TamableAnimal> pEntityType, Level pLevel) {
         super(pEntityType, pLevel);
     }
@@ -66,6 +81,9 @@ public class TameableDragonEntity extends AbstractDragonEntity {
     public void addAdditionalSaveData(CompoundTag compound) {
         super.addAdditionalSaveData(compound);
         compound.putBoolean(NBTConstants.RESPAWNED_FROM_SNAPSHOT, respawnedFromSnapshot);
+        if (snapshotMintGameTime >= 0) {
+            compound.putLong(NBTConstants.SNAPSHOT_MINT_GAME_TIME, snapshotMintGameTime);
+        }
     }
 
     @Override
@@ -73,6 +91,9 @@ public class TameableDragonEntity extends AbstractDragonEntity {
         super.readAdditionalSaveData(compound);
         if (compound.contains(NBTConstants.RESPAWNED_FROM_SNAPSHOT)) {
             respawnedFromSnapshot = compound.getBoolean(NBTConstants.RESPAWNED_FROM_SNAPSHOT);
+        }
+        if (compound.contains(NBTConstants.SNAPSHOT_MINT_GAME_TIME)) {
+            snapshotMintGameTime = compound.getLong(NBTConstants.SNAPSHOT_MINT_GAME_TIME);
         }
     }
 

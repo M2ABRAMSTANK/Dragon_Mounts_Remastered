@@ -274,9 +274,15 @@ public class DMRCommand {
                     dragon.setHealth(Math.max(1, dragon.getHealth()));
                     // Wave 5, Fix B4/B6: recall mints a fresh entity from a snapshot just
                     // like the whistle summon path's last resort — flag it with the same
-                    // provenance so the join-time dedup check can reclaim it if this ever
-                    // races a still-live original.
+                    // provenance (and mint-time stamp, Wave 5 review Blocker 1(b)) so the
+                    // join-time dedup check can reclaim it within the evidence window if
+                    // this ever races a still-live original.
                     dragon.setRespawnedFromSnapshot(true);
+                    // Wave 5 review Blocker 1(b): stamp from the overworld's clock, matching
+                    // DragonWhistleHandler's reclaim check — dimensions can't drift relative
+                    // to each other, but staying consistent removes any doubt.
+                    dragon.setSnapshotMintGameTime(
+                            source.getServer().overworld().getGameTime());
                     level.addFreshEntity(dragon);
                 }
             }

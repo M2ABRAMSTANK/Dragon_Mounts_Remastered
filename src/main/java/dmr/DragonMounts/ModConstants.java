@@ -37,5 +37,7 @@ public class ModConstants {
         public static final String WAS_HATCHED = "wasHatched";
         /** Wave 5, Fix B4: snapshot-respawn clone provenance flag. */
         public static final String RESPAWNED_FROM_SNAPSHOT = "respawnedFromSnapshot";
+        /** Wave 5 review Blocker 1(b): game time the clone-provenance flag was stamped at. */
+        public static final String SNAPSHOT_MINT_GAME_TIME = "snapshotMintGameTime";
     }
 }

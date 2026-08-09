@@ -6,6 +6,7 @@ import dmr.DragonMounts.common.capability.DragonOwnerCapability;
 import dmr.DragonMounts.common.capability.types.NBTInterface;
 import dmr.DragonMounts.config.ServerConfig;
 import dmr.DragonMounts.network.packets.CompleteDataSync;
+import dmr.DragonMounts.network.packets.DragonNBTSync;
 import dmr.DragonMounts.network.packets.DragonStatePacket;
 import dmr.DragonMounts.registry.ModCapabilities;
 import dmr.DragonMounts.registry.ModEntities;
@@ -23,9 +24,9 @@ import java.util.OptionalInt;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiPredicate;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -314,15 +315,27 @@ public class DragonWhistleHandler {
      *
      * <p>
      * Wave 5, Fix B3: 20 -> 60 ticks (1s -> 3s). A cold entity-chunk load (disk read +
-     * the FullChunkStatus promotion pipeline drainChunkTasks describes) can easily
-     * exceed 1 second under load; a timed-out deferred summon now fails SAFE (Fix
+     * the FullChunkStatus promotion pipeline, driven by the distance-manager/background
+     * executor entirely asynchronously — see the Blocker 2 comment in {@link
+     * #callDragon}) can easily exceed 1 second under load; a timed-out deferred summon
+     * now fails SAFE (Fix
      * B2's honest gate refuses and messages {@code not_found} instead of cloning), so
      * a longer deadline costs nothing but a slightly later "not found" message on the
      * rare genuinely-absent case, in exchange for far fewer premature clones.
      */
     private static final int DEFERRED_SUMMON_TIMEOUT_TICKS = 60;
 
-    private record DeferredSummon(UUID playerId, int index, int deadlineTick) {}
+    /**
+     * How often (in ticks) a deferred summon's {@code findDragon} re-check runs while
+     * waiting for the deadline. Wave 5 review Blocker 2: the previous implementation
+     * called {@code findDragon} (and a blocking chunk-task drain) EVERY tick, which is
+     * unnecessary — chunk promotion is driven by the distance-manager/background
+     * executor on its own schedule, not by how often we poll it. Re-checking every 5
+     * ticks is still responsive (a quarter-second) while cutting the poll rate 5x.
+     */
+    private static final int DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS = 5;
+
+    private record DeferredSummon(UUID playerId, int index, int deadlineTick, int nextCheckTick) {}
 
     /** Summons whose stored chunk was just ticketed and that re-check on a later tick. */
     private static final List<DeferredSummon> DEFERRED_SUMMONS = new CopyOnWriteArrayList<>();
@@ -375,54 +388,69 @@ public class DragonWhistleHandler {
                     boolean alreadyPending = DEFERRED_SUMMONS.stream()
                             .anyMatch(pending -> pending.playerId().equals(serverPlayer.getUUID())
                                     && pending.index() == summonItemIndex);
-                    if (!alreadyPending) {
-                        var chunkPos = new ChunkPos(instance.getLastPos());
-                        // Hold the chunk (POST_TELEPORT, 5-tick lifespan, refreshed by the
-                        // deferred poll below) and load it SYNCHRONOUSLY: the blocking
-                        // getChunk drives the chunk system on the server thread, and full
-                        // promotion flips the chunk's parked entity sections to visible
-                        // (PersistentEntitySectionManager.updateChunkStatus), so the
-                        // dragon usually becomes resolvable immediately.
-                        // Wave 5, Fix B1: radius 2 -> 4. Radius 2 only makes the center 5x5
-                        // chunks entity-accessible, but the widened-radius search box below
-                        // (and the honest gate's chunk sweep in respawnDragonFromSnapshot) both
-                        // span up to 9x9 chunks around lastPos — a narrower ticket left the
-                        // outer ring of that search box unloaded, which is exactly the gap the
-                        // honest gate (B2) needed closed to avoid a false "not found".
-                        storedLevel
-                                .getChunkSource()
-                                .addRegionTicket(TicketType.POST_TELEPORT, chunkPos, 4, serverPlayer.getId());
-                        storedLevel.getChunk(chunkPos.x, chunkPos.z);
-                        // Bounded real-time block (see drainChunkTasks javadoc) — this is
-                        // the primary resolution path; a couple hundred ms once, on the
-                        // rare cross-dimension summon, beats a slow deferred-summon poll that
-                        // sometimes clones the dragon.
-                        drainChunkTasks(storedLevel, () -> findDragon(player, summonItemIndex) != null, 250);
-
-                        var reChecked = findDragon(player, summonItemIndex);
-                        if (reChecked != null) {
-                            return summonExistingDragon(player, cap, summonItemIndex, reChecked);
-                        }
-
-                        // Still unresolved — entity data can stream in from disk
-                        // asynchronously after the block chunk loads. Poll for a bounded
-                        // number of ticks before treating the dragon as absent.
-                        DEFERRED_SUMMONS.add(new DeferredSummon(
-                                serverPlayer.getUUID(),
-                                summonItemIndex,
-                                serverPlayer.server.getTickCount() + DEFERRED_SUMMON_TIMEOUT_TICKS));
-                        DMR.LOGGER.debug(
-                                "Dragon {} not loaded; ticketed chunk {} in {} and deferred the summon for {}",
-                                instance.getUUID(),
-                                chunkPos,
-                                instance.getDimension(),
-                                player.getName().getString());
+                    if (alreadyPending) {
+                        // Wave 5 review fix #10: a re-press during the deferral window is a
+                        // no-op, not a fresh summon attempt — return false so summonDragon
+                        // does NOT stamp lastCall/cooldown for it (the sound already played
+                        // above; that's feedback enough that a summon is in progress).
+                        return false;
                     }
+
+                    var chunkPos = new ChunkPos(instance.getLastPos());
+                    // Wave 5, Fix B1: radius 2 -> 4. Radius 2 only makes the center 5x5
+                    // chunks entity-accessible, but the widened-radius search box below
+                    // (and the honest gate's chunk sweep in respawnDragonFromSnapshot) both
+                    // span up to 9x9 chunks around lastPos — a narrower ticket left the
+                    // outer ring of that search box unloaded, which is exactly the gap the
+                    // honest gate (B2) needed closed to avoid a false "not found".
+                    //
+                    // Wave 5 review Blocker 2: NO synchronous drain and NO blocking
+                    // ServerLevel#getChunk call here. Entity-section promotion is driven by
+                    // PersistentEntitySectionManager#tick, which runs from ServerLevel#tick
+                    // on the NORMAL tick loop — it cannot make progress while we block the
+                    // server thread waiting for it, so the old drain was provably useless
+                    // for exactly the thing it was trying to wait for, while still costing
+                    // real stall time (and re-aging every ticket server-wide via its
+                    // extra purgeStaleTickets calls). Just place the ticket and do ONE
+                    // immediate (already-resolved-case) check; if that misses, defer and
+                    // let processDeferredSummons poll asynchronously.
+                    storedLevel
+                            .getChunkSource()
+                            .addRegionTicket(
+                                    TicketType.POST_TELEPORT,
+                                    chunkPos,
+                                    SUMMON_CHUNK_TICKET_RADIUS,
+                                    serverPlayer.getId());
+
+                    var immediateCheck = findDragon(player, summonItemIndex);
+                    if (immediateCheck != null) {
+                        return summonExistingDragon(player, cap, summonItemIndex, immediateCheck);
+                    }
+
+                    DEFERRED_SUMMONS.add(new DeferredSummon(
+                            serverPlayer.getUUID(),
+                            summonItemIndex,
+                            serverPlayer.server.getTickCount() + DEFERRED_SUMMON_TIMEOUT_TICKS,
+                            serverPlayer.server.getTickCount() + DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS));
+                    DMR.LOGGER.debug(
+                            "Dragon {} not loaded; ticketed chunk {} in {} and deferred the summon for {}",
+                            instance.getUUID(),
+                            chunkPos,
+                            instance.getDimension(),
+                            player.getName().getString());
                     return true;
                 }
             }
 
-            return respawnDragonFromSnapshot(player, cap, summonItemIndex);
+            // Wave 5 review Blocker 1: "confirmed dead" means the whistle slot has a
+            // recorded respawn-delay entry — set by DragonWhistleEvent#onEntityDeath and
+            // never cleared until consumed here (or by allow_respawn=false) — which only
+            // happens after canCall's own respawnDelays > 0 gate has already let this
+            // call through, i.e. the countdown reached zero. That is proof the ORIGINAL
+            // entity was removed by vanilla death, not evidence of a chunk-load race, so
+            // this mint is never a clone candidate.
+            boolean confirmedDead = cap.respawnDelays.containsKey(summonItemIndex);
+            return respawnDragonFromSnapshot(player, cap, summonItemIndex, confirmedDead);
         }
 
         return false;
@@ -440,7 +468,18 @@ public class DragonWhistleHandler {
             return;
         }
 
+        int tick = server.getTickCount();
+
         for (DeferredSummon pending : DEFERRED_SUMMONS) {
+            // Wave 5 review Blocker 2: only do any work for this entry every
+            // DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS ticks (or on its deadline tick) —
+            // findDragon and the region-ticket refresh don't need to run every single
+            // tick; chunk promotion happens on its own schedule regardless of how often
+            // we ask.
+            if (tick < pending.nextCheckTick() && tick < pending.deadlineTick()) {
+                continue;
+            }
+
             var player = server.getPlayerList().getPlayer(pending.playerId());
             if (player == null) {
                 DEFERRED_SUMMONS.remove(pending);
@@ -449,9 +488,9 @@ public class DragonWhistleHandler {
 
             var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
 
-            // Keep the region ticket alive (POST_TELEPORT's lifespan is only 5 ticks)
-            // and pump the stored level's chunk tasks so pending status promotions can
-            // land before the re-check below.
+            // Keep the region ticket alive (POST_TELEPORT's lifespan is only 5 ticks,
+            // matching DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS so this refresh never lets
+            // it lapse).
             var instance = cap.dragonInstances.get(pending.index());
             if (instance != null && instance.getLastPos() != null && instance.getDimension() != null) {
                 var storedLevel = resolveStoredLevel(server, instance);
@@ -459,14 +498,10 @@ public class DragonWhistleHandler {
                     storedLevel
                             .getChunkSource()
                             .addRegionTicket(
-                                    // Wave 5, Fix B1: radius 2 -> 4 (matches the callDragon ticket
-                                    // above and the honest gate's search box in
-                                    // respawnDragonFromSnapshot).
-                                    TicketType.POST_TELEPORT, new ChunkPos(instance.getLastPos()), 4, player.getId());
-                    // Short budget here: this path already gets another attempt every tick
-                    // for up to DEFERRED_SUMMON_TIMEOUT_TICKS ticks, so a genuinely cold
-                    // (disk-backed) chunk gets many short chances rather than one long one.
-                    drainChunkTasks(storedLevel, () -> findDragon(player, pending.index()) != null, 50);
+                                    TicketType.POST_TELEPORT,
+                                    new ChunkPos(instance.getLastPos()),
+                                    SUMMON_CHUNK_TICKET_RADIUS,
+                                    player.getId());
                 }
             }
 
@@ -475,77 +510,19 @@ public class DragonWhistleHandler {
             if (dragon != null) {
                 DEFERRED_SUMMONS.remove(pending);
                 summonExistingDragon(player, cap, pending.index(), dragon);
-            } else if (server.getTickCount() >= pending.deadlineTick()) {
+            } else if (tick >= pending.deadlineTick()) {
                 DEFERRED_SUMMONS.remove(pending);
-                respawnDragonFromSnapshot(player, cap, pending.index());
-            }
-        }
-    }
-
-    /**
-     * Blocks the server thread — bounded by {@code budgetMillis} of real wall-clock time —
-     * pumping the given level's chunk-ticket machinery until {@code resolved} is satisfied.
-     *
-     * <p>
-     * Loading a chunk's TERRAIN ({@code ServerLevel#getChunk}, called before this) does
-     * NOT by itself make that chunk's entities resolvable: {@code ServerLevel#getEntity}
-     * and area-based entity queries alike are gated on the chunk's {@code FullChunkStatus}
-     * reaching {@code TRACKED}/{@code ENTITY_TICKING}
-     * ({@code PersistentEntitySectionManager#updateChunkStatus} only promotes a chunk's
-     * entity sections out of {@code HIDDEN} at that point — confirmed against decompiled
-     * 1.21.1 sources: {@code EntityLookup}'s UUID/id maps AND
-     * {@code EntitySectionStorage}'s AABB-bounded queries both filter on
-     * {@code Visibility#isAccessible()}). That promotion is driven by
-     * {@code DistanceManager}'s ticket-level BFS and {@code ChunkHolder} status-future
-     * resolution, whose completion is posted back from a background thread pool
-     * ({@code Util.backgroundExecutor()}) — real concurrency, not just queued work waiting
-     * for the main thread. A tight same-tick loop that only calls
-     * {@code ServerChunkCache#tick}/{@code pollTask} back-to-back never actually cedes the
-     * CPU, so the background thread may not get a chance to run before the loop gives up —
-     * this made the caller's gametest pass only when unrelated logging slowed the main
-     * thread down (incidentally giving the background executor real time to catch up) and
-     * fail at full speed. Mirrors vanilla's own blocking pattern for exactly this situation
-     * ({@code BlockableEventLoop#managedBlock}/{@code waitForTasks}: poll, then
-     * {@code LockSupport.parkNanos} briefly so another thread can actually run) rather than
-     * waiting on a fixed tick-count budget that races the executor instead of yielding to
-     * it. {@code tickChunks=false} deliberately skips the block/entity ticking half of
-     * {@code ServerChunkCache#tick} — this call must not double-tick gameplay in the stored
-     * dimension out of band from the normal tick loop.
-     *
-     * <p>
-     * Deliberately calls {@code ServerChunkCache#tick} (which is what actually schedules
-     * the {@code FullChunkStatus} promotion futures, via
-     * {@code DistanceManager#runAllUpdates}) exactly ONCE, not on every iteration of the
-     * wait loop: {@code ServerChunkCache#tick} starts by calling
-     * {@code DistanceManager#purgeStaleTickets}, which decrements every non-persistent
-     * ticket's remaining lifespan (including the caller's short-lived
-     * {@code TicketType.POST_TELEPORT} ticket) by one EVERY TIME IT RUNS — it is meant to
-     * be called once per REAL server tick. Calling it hundreds of times back-to-back in a
-     * tight loop (an earlier version of this method did) burns through that ticket's
-     * lifespan almost instantly and expires it before its promotion future ever resolves,
-     * which pulls the chunk's ticket level back down and re-triggers a demotion — a
-     * self-defeating loop that can never converge. The promotion futures scheduled by the
-     * single {@code tick()} call below (and by the {@code ServerLevel#getChunk} call the
-     * caller already made) complete on a background thread pool; only {@code pollTask} is
-     * needed afterward to run their completion callbacks once they land.
-     */
-    private static void drainChunkTasks(ServerLevel level, BooleanSupplier resolved, long budgetMillis) {
-        var chunkSource = level.getChunkSource();
-        chunkSource.tick(() -> true, false);
-
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMillis);
-        while (!resolved.getAsBoolean() && System.nanoTime() < deadline) {
-            boolean ranAny = false;
-            int taskBudget = 1000;
-            while (taskBudget-- > 0 && chunkSource.pollTask()) {
-                ranAny = true;
-            }
-
-            if (!ranAny) {
-                // Nothing was ready to run on the main thread — give the background chunk
-                // executor a real (if brief) slice of wall-clock time before polling again,
-                // instead of spinning and starving it entirely.
-                LockSupport.parkNanos(100_000L);
+                // See callDragon's confirmedDead comment — same reasoning applies to a
+                // deferred summon that times out after a confirmed death.
+                boolean confirmedDead = cap.respawnDelays.containsKey(pending.index());
+                respawnDragonFromSnapshot(player, cap, pending.index(), confirmedDead);
+            } else {
+                DEFERRED_SUMMONS.remove(pending);
+                DEFERRED_SUMMONS.add(new DeferredSummon(
+                        pending.playerId(),
+                        pending.index(),
+                        pending.deadlineTick(),
+                        tick + DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS));
             }
         }
     }
@@ -670,8 +647,23 @@ public class DragonWhistleHandler {
      * Both are now refused (not_found, recoverable — the player can just call again) —
      * because {@code duplicate_resolution} defaults to LOG (never removes) as of this
      * wave, a wrongly-minted clone here is permanent, not recoverable.
+     *
+     * @param confirmedDead Wave 5 review Blocker 1: true when this mint follows a
+     *                      recorded death (the caller found a {@code respawnDelays}
+     *                      entry for this whistle slot) — vanilla death already
+     *                      removed the original entity, so this mint can NEVER be a
+     *                      clone and must NOT be flagged {@code respawnedFromSnapshot}.
+     *                      The normal death -> respawn-delay -> whistle-call flow was
+     *                      minting flagged entities unconditionally, which meant every
+     *                      dragon that ever died and was re-summoned became eligible
+     *                      for the join-time reclaim to discard — including a
+     *                      player's live, legitimate dragon, if an unrelated unflagged
+     *                      legacy duplicate ever loaded nearby. Only the genuine
+     *                      "can't find it, might be a race" path (and {@code /dmr
+     *                      recall}) may flag a mint.
      */
-    private static boolean respawnDragonFromSnapshot(Player player, DragonOwnerCapability cap, int summonItemIndex) {
+    private static boolean respawnDragonFromSnapshot(
+            Player player, DragonOwnerCapability cap, int summonItemIndex, boolean confirmedDead) {
         // The binding can be cleaned up between a deferred summon's scheduling and its
         // re-check (canCall's invalid-data sweep, dragon death without respawn, ...);
         // createDragonEntity dereferences the instance, so bail here instead.
@@ -823,14 +815,32 @@ public class DragonWhistleHandler {
         }
 
         DMR.LOGGER.warn(
-                "Respawning dragon: {} from snapshot for player: {} — no live entity found in its stored dimension",
+                "Respawning dragon: {} from snapshot for player: {} — {}",
                 newDragon.getDragonUUID(),
-                player.getName().getString());
+                player.getName().getString(),
+                confirmedDead
+                        ? "confirmed dead (respawn-delay entry present); minting unflagged"
+                        : "no live entity found in its stored dimension");
 
-        // Wave 5, Fix B4: flag this entity as a snapshot-respawn clone BEFORE it joins
-        // the level, so the join-time dedup check can prove (never guess) which entity
-        // to reclaim if this mint ever turns out to have raced a still-live original.
-        newDragon.setRespawnedFromSnapshot(true);
+        if (confirmedDead) {
+            // Wave 5 review Blocker 1(a): vanilla already removed the original on death —
+            // this can never be a clone. Do NOT flag it, and consume the respawn-delay
+            // entry that proved that so a LATER, genuine "can't find it" mint for this
+            // same slot isn't wrongly treated as confirmed-dead too.
+            cap.respawnDelays.remove(summonItemIndex);
+        } else {
+            // Wave 5, Fix B4: flag this entity as a snapshot-respawn clone BEFORE it
+            // joins the level, so the join-time dedup check can prove (never guess)
+            // which entity to reclaim if this mint ever turns out to have raced a
+            // still-live original. Wave 5 review Blocker 1(b): also stamp the game time
+            // of the mint — maybeReclaimSnapshotClone only trusts this flag as
+            // clone-proof within a bounded evidence window (see
+            // SNAPSHOT_CLONE_EVIDENCE_WINDOW_TICKS); a clone that survived
+            // contest-free well past that window has accrued its own progression and
+            // must not be silently discarded.
+            newDragon.setRespawnedFromSnapshot(true);
+            newDragon.setSnapshotMintGameTime(server.overworld().getGameTime());
+        }
 
         newDragon.setPos(player.getX(), player.getY(), player.getZ());
         player.level.addFreshEntity(newDragon);
@@ -898,8 +908,9 @@ public class DragonWhistleHandler {
                 // requires BOTH the exact stored entityId AND that entity's chunk section
                 // to already be promoted "visible" (PersistentEntitySectionManager) — a
                 // status change driven by the chunk-ticket/distance-manager pipeline that
-                // callDragon/processDeferredSummons force synchronously via
-                // drainChunkTasks() before calling in here. Area-bounded entity queries
+                // callDragon/processDeferredSummons place a region ticket for and then
+                // poll (never block) waiting on, before calling in here. Area-bounded
+                // entity queries
                 // are gated by that SAME visibility threshold (confirmed against
                 // decompiled 1.21.1 sources: EntitySectionStorage#forEachAccessibleNonEmptySection
                 // filters on Visibility#isAccessible(), same as EntityLookup's UUID/id
@@ -1021,6 +1032,15 @@ public class DragonWhistleHandler {
      * mint a snapshot clone (the caller's absence-confirmation gates still apply on
      * top of this).
      */
+    /**
+     * Dimension strings this method has already warned about (Wave 5 review fix #12):
+     * a hot binding with a malformed/unknown dimension gets re-resolved on every
+     * summon-related check, so logging unconditionally would spam the log at the same
+     * rate the old unguarded parse used to CRASH at. One WARN per unique string for
+     * the life of the server is enough for an operator to notice and fix the data.
+     */
+    private static final Set<String> WARNED_MALFORMED_DIMENSIONS = ConcurrentHashMap.newKeySet();
+
     public static @Nullable ServerLevel resolveStoredLevel(MinecraftServer server, DragonInstance instance) {
         if (instance == null || instance.getDimension() == null) {
             return null;
@@ -1030,12 +1050,17 @@ public class DragonWhistleHandler {
             var key = ResourceKey.create(Registries.DIMENSION, ResourceLocation.parse(instance.getDimension()));
             return server.getLevel(key);
         } catch (Exception e) {
-            DMR.LOGGER.warn(
-                    "Could not resolve dimension '{}' for a dragon whistle binding — malformed or unknown"
-                            + " dimension key; treating the dragon's location as unknown rather than throwing or"
-                            + " assuming it is absent",
-                    instance.getDimension(),
-                    e);
+            // Wave 5 review fix #12: no stack trace (this is routine legacy/malformed
+            // data, not an exceptional failure — e.toString() names the problem without
+            // a multi-line trace), and only once per unique malformed string.
+            if (WARNED_MALFORMED_DIMENSIONS.add(instance.getDimension())) {
+                DMR.LOGGER.warn(
+                        "Could not resolve dimension '{}' for a dragon whistle binding — malformed or unknown"
+                                + " dimension key ({}); treating the dragon's location as unknown rather than"
+                                + " throwing or assuming it is absent",
+                        instance.getDimension(),
+                        e.toString());
+            }
             return null;
         }
     }
@@ -1093,15 +1118,46 @@ public class DragonWhistleHandler {
     }
 
     /**
-     * Chunk coordinates intersecting the same search box {@link #findDragon}'s
-     * widened-radius scan reads (Wave 5, Fix B2): centered on {@code center}, sized
-     * {@link ModConstants.DragonConstants#DRAGON_SEARCH_RADIUS} blocks on both
-     * horizontal axes.
+     * Wave 5 review HIGH-3: vanilla's {@code EntitySectionStorage} (backing both
+     * {@code ServerLevel#getEntitiesOfClass} and {@code EntityLookup}'s AABB queries)
+     * inflates the query AABB by this many blocks on every axis BEFORE computing which
+     * chunk sections to sweep — confirmed against decompiled 1.21.1 sources
+     * ({@code EntitySectionStorage#forEachAccessibleNonEmptySection} sections
+     * {@code aabb.inflate(2.0)}, not the raw query box). {@link #searchBoxChunks} must
+     * mirror that inflation exactly, or for any {@code lastPos} whose x/z falls in the
+     * ~44% of positions where the raw (uninflated) chunk bounds differ from the
+     * inflated ones (x or z mod 16 in {2,3,12,13}), the honest gate would certify a
+     * chunk ring as "loaded" that {@link #findDragon}'s widened-radius scan can
+     * actually read entities out of — reopening exactly the residual clone hole Fix B2
+     * exists to close.
      */
-    private static List<ChunkPos> searchBoxChunks(BlockPos center) {
-        double half = ModConstants.DragonConstants.DRAGON_SEARCH_RADIUS / 2.0;
-        var min = new ChunkPos(BlockPos.containing(center.getX() - half, center.getY(), center.getZ() - half));
-        var max = new ChunkPos(BlockPos.containing(center.getX() + half, center.getY(), center.getZ() + half));
+    public static final double SEARCH_BOX_INFLATION_BLOCKS = 2.0;
+
+    /**
+     * Region-ticket radius (in chunks) held around a stored {@code lastPos} while
+     * resolving a summon (Wave 5, Fix B1, widened 2 -> 4). Must stay large enough that
+     * every chunk {@link #searchBoxChunks} can require entity-loaded is within
+     * Chebyshev distance of {@code lastPos}'s own chunk, or the ticket won't actually
+     * cover the honest gate's search area and a legitimate summon would spuriously
+     * refuse. {@code DragonWhistleHandlerLogicTests#ticketRadiusCoversWorstCaseSearchBox}
+     * asserts this coupling so a future {@code DRAGON_SEARCH_RADIUS} bump fails a test
+     * instead of silently reopening the B1/B2 gap.
+     */
+    public static final int SUMMON_CHUNK_TICKET_RADIUS = 4;
+
+    /**
+     * Chunk coordinates intersecting the same (vanilla-inflated) search box
+     * {@link #findDragon}'s widened-radius scan reads (Wave 5, Fix B2 / review
+     * HIGH-3): centered on {@code center}, sized
+     * {@link ModConstants.DragonConstants#DRAGON_SEARCH_RADIUS} blocks on both
+     * horizontal axes, inflated by {@link #SEARCH_BOX_INFLATION_BLOCKS} on every side
+     * to match vanilla's {@code EntitySectionStorage} query inflation exactly. Package-
+     * visible (not private) so it can be unit-tested directly.
+     */
+    public static List<ChunkPos> searchBoxChunks(BlockPos center) {
+        double reach = ModConstants.DragonConstants.DRAGON_SEARCH_RADIUS / 2.0 + SEARCH_BOX_INFLATION_BLOCKS;
+        var min = new ChunkPos(BlockPos.containing(center.getX() - reach, center.getY(), center.getZ() - reach));
+        var max = new ChunkPos(BlockPos.containing(center.getX() + reach, center.getY(), center.getZ() + reach));
 
         List<ChunkPos> chunks = new ArrayList<>();
         for (int x = min.x; x <= max.x; x++) {
@@ -1112,28 +1168,62 @@ public class DragonWhistleHandler {
         return chunks;
     }
 
-    private record PendingReclaim(ResourceKey<Level> dimension, UUID entityUUID, UUID dragonUUID) {}
+    /**
+     * How long (in ticks) a {@code respawnedFromSnapshot} flag is trusted as clone
+     * proof, from its {@code snapshotMintGameTime} stamp (Wave 5 review Blocker 1(b)).
+     * ~7 in-game days (168000 = 7 * 24000). A clone that has survived unchallenged for
+     * that long has accrued its own progression (taming interactions, inventory,
+     * playtime) — silently discarding it on a stale flag would BE the duplication bug
+     * this mechanism exists to prevent, just delayed. Past the window (or with no
+     * recorded mint time — e.g. a legacy entity, or one flagged before this fix), a
+     * mismatch falls through to plain {@code duplicate_resolution=LOG} behavior: both
+     * entities survive, logged for operator triage.
+     */
+    public static final long SNAPSHOT_CLONE_EVIDENCE_WINDOW_TICKS = 168_000L;
 
     /**
-     * Snapshot clones proven by {@link #maybeReclaimSnapshotClone} and queued for
-     * discard on the NEXT server tick (Wave 5, Fix B4) — mirrors
-     * {@link #DEFERRED_SUMMONS}'s deferred-queue pattern. Never discarded
+     * A same-dragonUUID mismatch where exactly one live entity carries
+     * {@code respawnedFromSnapshot}, detected in {@code DragonWhistleEvent}'s join
+     * handler and queued here for verification and action on the NEXT server tick
+     * (Wave 5, Fix B4; review fix #9). Deliberately carries only UUIDs/dimensions, not
+     * entity references — both entities are re-resolved via {@code Level#getEntity} at
+     * process time so nothing is ever mutated or discarded on stale information.
+     */
+    private record PendingReclaim(
+            UUID ownerId,
+            int index,
+            UUID dragonUUID,
+            ResourceKey<Level> cloneDimension,
+            UUID cloneEntityUUID,
+            ResourceKey<Level> originalDimension,
+            UUID originalEntityUUID) {}
+
+    /**
+     * Queued reclaims awaiting verification (Wave 5, Fix B4). Never acted on
      * synchronously from inside {@code EntityJoinLevelEvent}: removing/discarding an
-     * entity from within that event risks a ConcurrentModificationException on the
-     * level's entity-iteration machinery and ghost-entity bookkeeping (the same reason
-     * {@code duplicate_resolution=AGGRESSIVE} only ever cancels the event rather than
-     * discarding directly).
+     * entity — or mutating the owner's whistle binding — from within that event risks
+     * a ConcurrentModificationException on the level's entity-iteration machinery and
+     * ghost-entity bookkeeping (the same reason {@code duplicate_resolution=AGGRESSIVE}
+     * only ever cancels the event rather than discarding directly).
      */
     private static final List<PendingReclaim> PENDING_RECLAIMS = new CopyOnWriteArrayList<>();
 
-    private static void queueSnapshotCloneReclaim(TameableDragonEntity clone) {
-        PENDING_RECLAIMS.add(new PendingReclaim(clone.level().dimension(), clone.getUUID(), clone.getDragonUUID()));
-    }
-
     /**
-     * Runs queued snapshot-clone reclaims (Wave 5, Fix B4). Called once per server tick
-     * from {@link dmr.DragonMounts.common.events.DragonWhistleEvent}, mirroring
-     * {@link #processDeferredSummons}'s pattern.
+     * Runs queued snapshot-clone reclaims (Wave 5, Fix B4; review fix #9). Called once
+     * per server tick from {@link dmr.DragonMounts.common.events.DragonWhistleEvent},
+     * mirroring {@link #processDeferredSummons}'s pattern.
+     *
+     * <p>
+     * This is where ALL of the actual verification and mutation happens — detection
+     * (in {@link #maybeReclaimSnapshotClone}) only decides whether a reclaim is
+     * PLAUSIBLE and queues it; this method re-resolves both entities by UUID, and only
+     * if the original still resolves and is alive does it re-point the whistle
+     * binding (index, NBT snapshot, lastSummons), push the owner a fresh sync, and
+     * discard the clone — atomically, in that order, so a client is never told about a
+     * binding for an entity that then fails to get discarded (or vice versa). If the
+     * original vanished (its own join was cancelled by a later listener, it died,
+     * etc.) the reclaim is dropped WITHOUT touching the clone — better to leave an
+     * un-reclaimed clone for operator triage than to discard the only entity left.
      */
     public static void processPendingReclaims(MinecraftServer server) {
         if (PENDING_RECLAIMS.isEmpty()) {
@@ -1143,56 +1233,117 @@ public class DragonWhistleHandler {
         for (PendingReclaim pending : PENDING_RECLAIMS) {
             PENDING_RECLAIMS.remove(pending);
 
-            var level = server.getLevel(pending.dimension());
-            if (level == null) {
+            var owner = server.getPlayerList().getPlayer(pending.ownerId());
+            if (owner == null) {
+                continue; // Owner logged off since the reclaim was queued; drop it.
+            }
+
+            var originalLevel = server.getLevel(pending.originalDimension());
+            TameableDragonEntity original = originalLevel != null
+                            && originalLevel.getEntity(pending.originalEntityUUID()) instanceof TameableDragonEntity o
+                    ? o
+                    : null;
+
+            if (original == null || !original.isAlive()) {
+                DMR.LOGGER.info(
+                        "Snapshot-clone reclaim dropped for dragonUUID {} (owner {}): the proven original {} no"
+                                + " longer resolves — leaving the flagged entity untouched",
+                        pending.dragonUUID(),
+                        owner.getName().getString(),
+                        pending.originalEntityUUID());
                 continue;
             }
 
-            // Re-resolve and re-verify at discard time — the queued entity may have
-            // already left (unloaded, died, or a passenger boarded) in the tick(s) since
-            // it was queued.
-            if (!(level.getEntity(pending.entityUUID()) instanceof TameableDragonEntity clone)
-                    || !clone.isRespawnedFromSnapshot()) {
+            var cloneLevel = server.getLevel(pending.cloneDimension());
+            TameableDragonEntity clone = cloneLevel != null
+                            && cloneLevel.getEntity(pending.cloneEntityUUID()) instanceof TameableDragonEntity c
+                    ? c
+                    : null;
+
+            if (clone == null || !clone.isAlive() || !clone.isRespawnedFromSnapshot()) {
+                continue; // Already gone, or unflagged since queued — nothing to reclaim.
+            }
+
+            // Wave 5 review Blocker 1(b): re-check the evidence window at ACT time, not
+            // just at detection — the authoritative "is this still clone-proof" check
+            // belongs where the decision to discard is actually made.
+            long mintTime = clone.getSnapshotMintGameTime();
+            long gameTime = server.overworld().getGameTime();
+            if (mintTime < 0 || gameTime - mintTime > SNAPSHOT_CLONE_EVIDENCE_WINDOW_TICKS) {
+                DMR.LOGGER.info(
+                        "Snapshot-clone reclaim SKIPPED for dragonUUID {} (owner {}): flagged entity {} was minted"
+                                + " too long ago (or has no recorded mint time) to trust as clone-proof — both"
+                                + " entities left alone",
+                        pending.dragonUUID(),
+                        owner.getName().getString(),
+                        clone.getUUID());
                 continue;
             }
 
             if (clone.isVehicle()) {
                 DMR.LOGGER.info(
-                        "Snapshot-clone reclaim aborted at discard time for dragonUUID {}: a passenger boarded the"
-                                + " flagged clone {} before the reclaim could run — leaving it in place",
+                        "Snapshot-clone reclaim SKIPPED for dragonUUID {} (owner {}): flagged clone {} currently"
+                                + " has a passenger — leaving both entities in place",
                         pending.dragonUUID(),
+                        owner.getName().getString(),
                         clone.getUUID());
                 continue;
             }
 
+            // Wave 5 review fix #6: refresh the NBT snapshot from the CONFIRMED
+            // original (not the clone's — the clone-era snapshot would resurrect
+            // clone stats on the dragon's next death) and push the owner a fresh sync
+            // so the client's binding/NBT aren't left stale.
+            var cap = owner.getData(ModCapabilities.PLAYER_CAPABILITY);
+            var nbtData = original.serializeNBT(original.level.registryAccess());
+            cap.dragonNBTs.put(pending.index(), nbtData);
+            cap.dragonInstances.put(pending.index(), new DragonInstance(original));
+            cap.lastSummons.put(pending.index(), original.getUUID());
+
+            if (owner instanceof ServerPlayer serverPlayer) {
+                PacketDistributor.sendToPlayer(serverPlayer, new DragonNBTSync(pending.index(), nbtData));
+                PacketDistributor.sendToPlayer(serverPlayer, new CompleteDataSync(owner));
+            }
+
             DMR.LOGGER.info(
-                    "Snapshot-clone reclaim: discarding flagged clone {} (dragonUUID {}) in {} at ({}, {}, {})",
+                    "Snapshot-clone reclaim: re-pointing whistle binding for dragonUUID {} (owner {}) at original"
+                            + " entity {} in {} at ({}, {}, {}); discarding flagged clone {} in {} at ({}, {}, {})",
+                    pending.dragonUUID(),
+                    owner.getName().getString(),
+                    original.getUUID(),
+                    original.level().dimension().location(),
+                    original.getX(),
+                    original.getY(),
+                    original.getZ(),
                     clone.getUUID(),
-                    clone.getDragonUUID(),
-                    level.dimension().location(),
+                    clone.level().dimension().location(),
                     clone.getX(),
                     clone.getY(),
                     clone.getZ());
+
             clone.discard();
         }
     }
 
     /**
-     * Wave 5, Fix B4: self-healing reclaim of a PROVEN snapshot-respawn clone.
+     * Wave 5, Fix B4: detects a PLAUSIBLE snapshot-respawn clone and queues it for
+     * verification (review fix #9 moved the actual proof/mutation/discard into
+     * {@link #processPendingReclaims}, run on the next tick).
      *
      * <p>
      * Called from {@code DragonWhistleEvent#onEntityJoinWorld} whenever the existing
-     * duplicate-dragon dedup check (a {@code lastSummons} mismatch) fires. Looks up the
+     * duplicate-dragon dedup check (a {@code lastSummons} mismatch) fires, and ONLY
+     * when {@code duplicate_resolution=LOG} (review fix #7 — {@code OFF} means "never
+     * touch duplicates" and must stay that way; {@code AGGRESSIVE} already cancels the
+     * joining entity's own join unconditionally, and running reclaim first could
+     * re-point the binding at that same soon-to-be-cancelled entity). Looks up the
      * OTHER live entity sharing this dragonUUID — the one the binding currently
      * expects — and, if EXACTLY ONE of the two carries the
-     * {@code respawnedFromSnapshot} provenance flag, treats that one as the clone: the
-     * whistle binding is re-pointed at the other (proven original) immediately, and
-     * the clone is queued for discard on the next server tick via
-     * {@link #processPendingReclaims} (never discarded synchronously here — see
-     * {@link #PENDING_RECLAIMS}'s javadoc). Zero or two flagged entities are not
-     * provably a clone situation and are left entirely to {@code duplicate_resolution}
-     * (default LOG) — this never guesses from binding staleness, which is the
-     * destructive {@code AGGRESSIVE} bug this mechanism was built to avoid repeating.
+     * {@code respawnedFromSnapshot} provenance flag, queues it as the candidate clone.
+     * Zero or two flagged entities are not provably a clone situation and are left
+     * entirely to the {@code duplicate_resolution=LOG} logging above — this never
+     * guesses from binding staleness, which is the destructive {@code AGGRESSIVE} bug
+     * this mechanism was built to avoid repeating.
      *
      * @param joiningDragon    the entity that just triggered the dedup mismatch
      * @param owner            the whistle owner
@@ -1237,37 +1388,27 @@ public class DragonWhistleHandler {
         TameableDragonEntity clone = joiningFlagged ? joiningDragon : other;
         TameableDragonEntity original = joiningFlagged ? other : joiningDragon;
 
-        if (clone.isVehicle()) {
-            DMR.LOGGER.info(
-                    "Snapshot-clone reclaim SKIPPED for dragonUUID {} (owner {}): flagged clone {} currently has a"
-                            + " passenger — leaving both entities in place",
-                    clone.getDragonUUID(),
-                    owner.getName().getString(),
-                    clone.getUUID());
-            return;
-        }
-
-        var cap = owner.getData(ModCapabilities.PLAYER_CAPABILITY);
-        cap.dragonInstances.put(index, new DragonInstance(original));
-        cap.lastSummons.put(index, original.getUUID());
-
-        DMR.LOGGER.info(
-                "Snapshot-clone reclaim: re-pointing whistle binding for dragonUUID {} (owner {}) at original"
-                        + " entity {} in {} at ({}, {}, {}); queuing flagged clone {} in {} at ({}, {}, {}) for"
-                        + " discard",
-                clone.getDragonUUID(),
-                owner.getName().getString(),
-                original.getUUID(),
-                original.level().dimension().location(),
-                original.getX(),
-                original.getY(),
-                original.getZ(),
+        PENDING_RECLAIMS.add(new PendingReclaim(
+                owner.getUUID(),
+                index,
+                joiningDragon.getDragonUUID(),
+                clone.level().dimension(),
                 clone.getUUID(),
-                clone.level().dimension().location(),
-                clone.getX(),
-                clone.getY(),
-                clone.getZ());
+                original.level().dimension(),
+                original.getUUID()));
+    }
 
-        queueSnapshotCloneReclaim(clone);
+    /**
+     * Wave 5 review fix #5: {@link #DEFERRED_SUMMONS} and {@link #PENDING_RECLAIMS}
+     * hold absolute {@code server.getTickCount()}-based deadlines. That counter resets
+     * to zero on every new integrated-server session, so an entry left over from a
+     * previous session (e.g. the player quit mid-deferral) would have an already-past
+     * "deadline" the moment the world loads again — silently firing a snapshot respawn
+     * or a clone reclaim the player never actually triggered this session. Call from
+     * {@code ServerStoppingEvent} to guarantee neither queue survives a server stop.
+     */
+    public static void clearTransientState() {
+        DEFERRED_SUMMONS.clear();
+        PENDING_RECLAIMS.clear();
     }
 }

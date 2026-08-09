@@ -15,6 +15,7 @@ import java.util.UUID;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestRegistry;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityType;
@@ -570,13 +571,20 @@ public class CommunityRegressionTests {
         var original = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
         original.setBreed(DragonBreedsRegistry.getDefault());
         original.tamedFor(player, true);
+        // Distinguishing marker (Wave 5 review fix #6 coverage): lets the assertion
+        // below tell "NBT refreshed from the ORIGINAL" apart from "still the stale
+        // clone-era snapshot written when the whistle was first bound to the clone".
+        original.setCustomName(Component.literal("OriginalMarker"));
 
         // The "clone": a second dragon sharing the SAME dragonUUID, flagged the way the
-        // real respawnDragonFromSnapshot path flags its mint.
+        // real respawnDragonFromSnapshot path flags its mint (including a FRESH mint
+        // timestamp — Wave 5 review Blocker 1(b): the reclaim only trusts the flag
+        // within its evidence window).
         var clone = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS.offset(4, 0, 0));
         clone.setBreed(DragonBreedsRegistry.getDefault());
         clone.setDragonUUID(original.getDragonUUID());
         clone.setRespawnedFromSnapshot(true);
+        clone.setSnapshotMintGameTime(helper.getLevel().getServer().overworld().getGameTime());
 
         // Bind the whistle at the CLONE — mirrors respawnDragonFromSnapshot re-pointing
         // the binding at the entity it just minted.
@@ -625,6 +633,16 @@ public class CommunityRegressionTests {
             return;
         }
 
+        // Wave 5 review fix #6: the NBT snapshot must be refreshed from the ORIGINAL,
+        // not left as the clone-era snapshot written when the whistle was first bound
+        // to the clone (which would resurrect clone stats on the dragon's next death).
+        var refreshedNbt = cap.dragonNBTs.get(0);
+        if (refreshedNbt == null || !refreshedNbt.contains("CustomName")) {
+            helper.fail("dragonNBTs was not refreshed from the original after the reclaim (still the clone-era"
+                    + " snapshot, or missing entirely)");
+            return;
+        }
+
         helper.succeed();
     }
 
@@ -649,6 +667,7 @@ public class CommunityRegressionTests {
         clone.setBreed(DragonBreedsRegistry.getDefault());
         clone.setDragonUUID(original.getDragonUUID());
         clone.setRespawnedFromSnapshot(true);
+        clone.setSnapshotMintGameTime(helper.getLevel().getServer().overworld().getGameTime());
 
         // Give the clone a passenger — the reclaim must refuse to touch it.
         var passenger = helper.spawn(EntityType.CHICKEN, DMRTestConstants.TEST_POS.offset(4, 0, 0));
@@ -658,6 +677,7 @@ public class CommunityRegressionTests {
         }
 
         DragonWhistleHandler.setDragon(player, clone, 0);
+        var cloneUuid = clone.getUUID();
 
         var tag = new CompoundTag();
         if (!original.save(tag)) {
@@ -689,6 +709,157 @@ public class CommunityRegressionTests {
             return;
         }
 
+        // Regression guard (Wave 5 review, test iii): a skipped reclaim must leave the
+        // binding exactly as it was — still pointing at the clone. Silently re-pointing
+        // it anyway (while leaving the clone alive) would orphan the clone from its
+        // owner's whistle without actually resolving anything.
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        var boundUuid = cap.lastSummons.get(0);
+        if (boundUuid == null || !boundUuid.equals(cloneUuid)) {
+            helper.fail("Whistle binding was changed even though the passenger-guard skipped the reclaim");
+            return;
+        }
+
         helper.succeed();
+    }
+
+    /**
+     * Wave 5 review, test (ii): a {@code respawnedFromSnapshot} flag older than {@link
+     * DragonWhistleHandler#SNAPSHOT_CLONE_EVIDENCE_WINDOW_TICKS} must NOT be trusted as
+     * clone-proof — both entities survive, left to {@code duplicate_resolution=LOG}'s
+     * plain logging instead of an automatic reclaim.
+     *
+     * <p>
+     * This is the reverse-provenance safety net: a "clone" that has survived
+     * unchallenged long enough to be well outside the evidence window has almost
+     * certainly accrued its own legitimate progression (taming, playtime, inventory),
+     * and discarding it on a stale flag would itself be exactly the kind of silent
+     * duplication-cleanup bug this fork exists to eliminate.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void snapshotCloneReclaimSkippedWhenEvidenceStale(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var original = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        original.setBreed(DragonBreedsRegistry.getDefault());
+        original.tamedFor(player, true);
+
+        var clone = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS.offset(4, 0, 0));
+        clone.setBreed(DragonBreedsRegistry.getDefault());
+        clone.setDragonUUID(original.getDragonUUID());
+        clone.setRespawnedFromSnapshot(true);
+        // Far enough in the past that "current game time - this" always exceeds the
+        // evidence window, regardless of how far along the gametest world's clock is.
+        clone.setSnapshotMintGameTime(-(DragonWhistleHandler.SNAPSHOT_CLONE_EVIDENCE_WINDOW_TICKS + 1_000_000L));
+
+        DragonWhistleHandler.setDragon(player, clone, 0);
+        var cloneUuid = clone.getUUID();
+
+        var tag = new CompoundTag();
+        if (!original.save(tag)) {
+            helper.fail("Failed to serialize the original dragon");
+            return;
+        }
+        original.discard();
+
+        var reloaded = EntityType.loadEntityRecursive(tag, helper.getLevel(), entity -> entity);
+        if (reloaded == null) {
+            helper.fail("Failed to deserialize the original dragon");
+            return;
+        }
+
+        if (!helper.getLevel().addFreshEntity(reloaded)) {
+            helper.fail("Original dragon failed to (re)join the level");
+            return;
+        }
+
+        DragonWhistleHandler.processPendingReclaims(helper.getLevel().getServer());
+
+        if (!clone.isAlive()) {
+            helper.fail("Snapshot clone with a stale (out-of-window) mint timestamp was reclaimed anyway");
+            return;
+        }
+
+        if (!reloaded.isAlive()) {
+            helper.fail("Original dragon did not survive the stale-evidence scenario");
+            return;
+        }
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        var boundUuid = cap.lastSummons.get(0);
+        if (boundUuid == null || !boundUuid.equals(cloneUuid)) {
+            helper.fail("Whistle binding was changed even though the evidence-window check skipped the reclaim");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Wave 5 review, test (i) (Blocker 1(a)): a dragon respawned after a CONFIRMED
+     * death (a recorded {@code respawnDelays} entry for its whistle slot — the normal
+     * death -> respawn-delay -> whistle-call flow) must NOT be flagged
+     * {@code respawnedFromSnapshot}. Vanilla death already removed the original entity,
+     * so this mint can never be a clone; flagging it anyway made every dragon that ever
+     * died and was re-summoned permanently eligible for the join-time reclaim to
+     * discard, including a player's live, legitimate dragon.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void deathRespawnMintIsNotFlagged(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+        DragonWhistleHandler.setDragon(player, dragon, 0);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        // getDragonSummonIndex(Player) resolves the summon slot from the WHISTLE ITEM
+        // in hand, not from dragonInstances directly — without one, canCall refuses
+        // with no_whistle before ever reaching the respawn path.
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == 0) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        // Simulate the END STATE of the real death -> respawn-delay -> whistle-call
+        // flow (DragonWhistleEvent#onEntityDeath populates respawnDelays; the
+        // onLivingUpdate countdown reaching zero leaves the entry in place at 0 — see
+        // canCall's respawnDelays > 0 gate, which is why callDragon can even reach this
+        // point) without waiting out a real death animation + respawn timer.
+        cap.respawnDelays.put(0, 0);
+        dragon.discard();
+
+        if (!DragonWhistleHandler.summonDragon(player)) {
+            helper.fail("summonDragon returned false immediately — expected the ticket-and-defer path to accept"
+                    + " (chunk is already loaded in a gametest, so the deferred re-check should find nothing and"
+                    + " fall through to the snapshot respawn once its deadline passes)");
+            return;
+        }
+
+        helper.succeedWhen(() -> {
+            var respawned = DragonWhistleHandler.findDragon(player, 0);
+            helper.assertTrue(
+                    respawned != null,
+                    "Dragon was not respawned from snapshot after the deferred"
+                            + " summon's deadline passed following a confirmed death");
+            helper.assertTrue(
+                    !respawned.isRespawnedFromSnapshot(),
+                    "Wave 5 review Blocker 1(a): a death-respawn mint must NOT be flagged as a snapshot clone");
+        });
     }
 }

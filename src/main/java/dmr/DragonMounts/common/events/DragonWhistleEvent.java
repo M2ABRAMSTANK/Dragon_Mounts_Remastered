@@ -23,6 +23,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.neoforged.neoforge.event.tick.LevelTickEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
@@ -40,6 +41,15 @@ public class DragonWhistleEvent {
         // onEntityJoinWorld's dedup check below. Never discarded synchronously from
         // inside EntityJoinLevelEvent itself (CME/ghost-entity risk).
         DragonWhistleHandler.processPendingReclaims(event.getServer());
+    }
+
+    @SubscribeEvent
+    public static void onServerStopping(ServerStoppingEvent event) {
+        // Wave 5 review fix #5: DEFERRED_SUMMONS/PENDING_RECLAIMS hold absolute
+        // tick-count deadlines that don't survive a server restart's tick counter
+        // reset — clear both so a leftover entry from a previous session can never
+        // fire a phantom summon or reclaim on the next one.
+        DragonWhistleHandler.clearTransientState();
     }
 
     @SubscribeEvent
@@ -114,10 +124,9 @@ public class DragonWhistleEvent {
                                 // duplicate_resolution semantics are NOT changed by reclaim
                                 // (Wave 5 spec): AGGRESSIVE already cancels the JOINING
                                 // entity below, unconditionally. Running reclaim first could
-                                // re-point the binding at that same joining entity and then
-                                // have this cancel refuse its join anyway — losing BOTH
-                                // entities. Leave AGGRESSIVE's pre-existing behavior alone;
-                                // reclaim only ever runs under OFF/LOG.
+                                // queue a re-point/discard for that same joining entity and
+                                // then have this cancel refuse its join anyway — losing BOTH
+                                // entities. Leave AGGRESSIVE's pre-existing behavior alone.
                                 //
                                 // Cancelling the join event is the only removal mechanism
                                 // permitted here — never remove/discard an entity from inside
@@ -126,13 +135,22 @@ public class DragonWhistleEvent {
                                 return;
                             }
 
-                            // Wave 5, Fix B4: independent of duplicate_resolution — only ever
-                            // acts on a PROVEN snapshot-clone (the respawnedFromSnapshot
-                            // provenance flag), never a guess based on binding staleness (the
-                            // destructive AGGRESSIVE bug this mechanism was built to avoid
-                            // repeating). Safe here: it only mutates capability data and
-                            // queues a LATER discard — it never discards synchronously.
-                            DragonWhistleHandler.maybeReclaimSnapshotClone(dragon, player, index, expectedEntityId);
+                            // Wave 5 review fix #7: reclaim runs ONLY under
+                            // duplicate_resolution=LOG, never OFF. OFF is documented as
+                            // "never touch duplicates" (ConfigProcessor.DuplicateResolution
+                            // javadoc) and must keep meaning exactly that; LOG is the
+                            // default this reclaim mechanism was designed for. Independent
+                            // of the logging above — only ever acts on a PROVEN snapshot
+                            // clone (the respawnedFromSnapshot provenance flag, within its
+                            // evidence window), never a guess based on binding staleness
+                            // (the destructive AGGRESSIVE bug this mechanism was built to
+                            // avoid repeating). Safe here: it only queues a candidate for
+                            // verification on a LATER tick — see
+                            // DragonWhistleHandler#processPendingReclaims — it never mutates
+                            // the binding or discards anything synchronously.
+                            if (resolution == ServerConfig.DuplicateResolution.LOG) {
+                                DragonWhistleHandler.maybeReclaimSnapshotClone(dragon, player, index, expectedEntityId);
+                            }
                         }
                     }
                 }
