@@ -8,18 +8,22 @@ import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModCapabilities;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModItems;
+import dmr.DragonMounts.server.container.DragonContainerMenu;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.inventory.DragonInventoryHandler.DragonInventory;
 import dmr.DragonMounts.server.items.DragonWhistleItem;
 import dmr.DragonMounts.server.worlddata.DragonWorldData;
+import io.netty.buffer.Unpooled;
 import java.util.UUID;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestRegistry;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.GameType;
@@ -1007,5 +1011,186 @@ public class CommunityRegressionTests {
                             + " clone (respawnDelays never populated; isConfirmedDead must fall back to the"
                             + " world-data record)");
         });
+    }
+
+    /** Opens a real {@link DragonContainerMenu} the same way the in-game "open inventory" flow does. */
+    private static DragonContainerMenu openDragonMenu(TameableDragonEntity dragon, Player player) {
+        FriendlyByteBuf buffer = new FriendlyByteBuf(Unpooled.buffer());
+        buffer.writeInt(dragon.getId());
+        return new DragonContainerMenu(0, player.getInventory(), buffer);
+    }
+
+    /**
+     * Test (i) (equipment-slot sort-region fix): the saddle/armor/chest slots (menu
+     * indices 0-2) must share ONE {@code Container} instance among themselves, but a
+     * DIFFERENT one from the storage grid (indices 3-29, which must all share a single
+     * instance in ascending index order). This IS the exact grouping contract
+     * client-side inventory sorters (ClientSort, MouseWheelie's lineage) use to decide
+     * sort-region boundaries — before the fix all 30 slots shared one {@code Container}
+     * (the dragon's real inventory) and a sorter would sweep equipment into the grid.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void dragonMenuEquipmentSlotsFormSeparateSortRegion(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var menu = openDragonMenu(dragon, player);
+
+        var equipmentContainer0 = menu.getSlot(0).container;
+        var equipmentContainer1 = menu.getSlot(1).container;
+        var equipmentContainer2 = menu.getSlot(2).container;
+        var storageContainer3 = menu.getSlot(3).container;
+
+        if (equipmentContainer0 != equipmentContainer1 || equipmentContainer1 != equipmentContainer2) {
+            helper.fail("Equipment slots (0-2) do not share a single Container instance among themselves");
+            return;
+        }
+
+        if (equipmentContainer0 == storageContainer3) {
+            helper.fail("Equipment slots (0-2) share a Container instance with the storage grid (slot 3) — a"
+                    + " sort-region-grouping sorter would treat them as one region and could sweep equipment"
+                    + " into the grid");
+            return;
+        }
+
+        for (int i = 3; i <= 29; i++) {
+            if (menu.getSlot(i).container != storageContainer3) {
+                helper.fail("Storage-grid slot " + i + " does not share the storage grid's Container instance"
+                        + " in ascending order");
+                return;
+            }
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Test (ii): writes through an equipment slot must land in the dragon's real
+     * backing inventory at the same index, and vice versa — the equipment view is a
+     * pure passthrough, not a separate store.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void dragonMenuEquipmentSlotWritesReachBackingContainer(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var menu = openDragonMenu(dragon, player);
+
+        // View -> backing.
+        menu.getSlot(0).set(new ItemStack(Items.SADDLE));
+        if (!dragon.getInventory().getItem(0).is(Items.SADDLE)) {
+            helper.fail("Setting the saddle slot through the menu did not reach dragon.getInventory() index 0");
+            return;
+        }
+
+        // Backing -> view.
+        dragon.getInventory().setItem(2, new ItemStack(Items.CHEST));
+        if (!menu.getSlot(2).getItem().is(Items.CHEST)) {
+            helper.fail("Setting dragon.getInventory() index 2 directly is not visible through the chest slot");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Test (iii): the dragon inventory NBT format (a flat byte {@code Slot} index
+     * across all 30 slots) must be byte-for-byte unaffected by the equipment-view
+     * split — the view is a menu-construction-time detail that never touches {@code
+     * DragonInventoryHandler.DragonInventory#writeNBT}/{@code readNBT} at all. Populates
+     * every slot (including the three the view now wraps) with a distinguishable item
+     * and round-trips through write/read.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate
+    @GameTest
+    @TestHolder
+    public static void dragonInventoryNbtRoundTripUnaffectedByEquipmentView(ExtendedGameTestHelper helper) {
+        var provider = helper.getLevel().registryAccess();
+        var original = new DragonInventory(provider);
+
+        original.inventory.setItem(0, new ItemStack(Items.SADDLE));
+        original.inventory.setItem(1, new ItemStack(Items.SADDLE));
+        original.inventory.setItem(2, new ItemStack(Items.CHEST));
+        for (int i = 3; i < original.inventory.getContainerSize(); i++) {
+            original.inventory.setItem(i, new ItemStack(Items.DIAMOND, (i % 64) + 1));
+        }
+
+        var tag = original.writeNBT();
+
+        var roundTripped = new DragonInventory(provider);
+        roundTripped.readNBT(tag);
+
+        for (int i = 0; i < original.inventory.getContainerSize(); i++) {
+            var expected = original.inventory.getItem(i);
+            var actual = roundTripped.inventory.getItem(i);
+            if (!ItemStack.matches(expected, actual)) {
+                helper.fail("NBT round-trip mismatch at slot " + i + ": expected " + expected + " but got " + actual);
+                return;
+            }
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Test (iv): menu slot ids (the {@code Slot#index} field the client/server
+     * protocol uses in click/set packets) must stay byte-identical to before the
+     * equipment-view split — this matters for compatibility with a mismatched
+     * client/server jar mid-update, not just internal consistency. Also checks each
+     * equipment slot's OWN container-local index (0/1/2) — the view is a straight 1:1
+     * passthrough over indices 0-2, not an offset.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void dragonMenuSlotIdsStayStable(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var menu = openDragonMenu(dragon, player);
+
+        if (menu.getSlot(0).index != 0
+                || menu.getSlot(1).index != 1
+                || menu.getSlot(2).index != 2
+                || menu.getSlot(3).index != 3
+                || menu.getSlot(29).index != 29) {
+            helper.fail("Menu slot ids (Slot#index) drifted from their expected 0/1/2/3/29 values — protocol"
+                    + " compatibility risk with a mismatched client/server jar");
+            return;
+        }
+
+        if (menu.getSlot(0).getContainerSlot() != 0
+                || menu.getSlot(1).getContainerSlot() != 1
+                || menu.getSlot(2).getContainerSlot() != 2) {
+            helper.fail("Equipment slots' own container-local index (getContainerSlot()) drifted from 0/1/2 —"
+                    + " the equipment view must be a 1:1 passthrough, not an offset");
+            return;
+        }
+
+        helper.succeed();
     }
 }

@@ -30,8 +30,18 @@ public class DragonContainerMenu extends AbstractContainerMenu {
         }
         this.dragonContainer = dragon.getInventory();
 
+        // Fix: gives the saddle/armor/chest slots (indices 0-2) a DIFFERENT Container
+        // identity from the storage grid (indices 3-29, still backed by
+        // dragonContainer directly) so client-side inventory sorters (ClientSort,
+        // MouseWheelie's lineage) — which group sort regions purely by consecutive
+        // slot.container identity — see a region boundary instead of one 30-slot
+        // region, and stop sweeping equipment into the grid. Every read/write on this
+        // view still flows straight through to dragonContainer at the same index; see
+        // DragonEquipmentContainer's javadoc.
+        Container equipmentView = new DragonEquipmentContainer(dragonContainer);
+
         dragonContainer.startOpen(pPlayerInventory.player);
-        this.addSlot(new Slot(dragonContainer, DragonInventory.SADDLE_SLOT, 102, 18) {
+        this.addSlot(new Slot(equipmentView, DragonInventory.SADDLE_SLOT, 102, 18) {
             public boolean mayPlace(ItemStack p_39677_) {
                 return p_39677_.is(Items.SADDLE) && !this.hasItem() && dragon.isSaddleable();
             }
@@ -48,7 +58,7 @@ public class DragonContainerMenu extends AbstractContainerMenu {
             }
         });
 
-        this.addSlot(new Slot(dragonContainer, DragonInventory.ARMOR_SLOT, 120, 18) {
+        this.addSlot(new Slot(equipmentView, DragonInventory.ARMOR_SLOT, 120, 18) {
             public boolean mayPlace(ItemStack p_39690_) {
                 return dragon.isArmor(p_39690_);
             }
@@ -64,7 +74,7 @@ public class DragonContainerMenu extends AbstractContainerMenu {
             }
         });
 
-        this.addSlot(new Slot(dragonContainer, DragonInventory.CHEST_SLOT, 138, 18) {
+        this.addSlot(new Slot(equipmentView, DragonInventory.CHEST_SLOT, 138, 18) {
             @Override
             public boolean mayPickup(Player pPlayer) {
                 return (dragon.inventoryEmpty()

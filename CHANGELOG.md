@@ -94,6 +94,23 @@ real-death cases — all before any of it reached players. Full detail in
   mismatch falls through to plain `duplicate_resolution = LOG` logging instead of an
   automatic reclaim, because a "clone" that survived unchallenged that long has almost
   certainly accrued its own legitimate progression.
+- **Inventory-sorter mods (ClientSort, and the whole MouseWheelie sorter lineage) could
+  scramble a dragon's equipment.** `DragonContainerMenu` backed ALL 30 of its slots — the
+  saddle, armor, and chest slots included — with the exact same `Container` instance (the
+  dragon's real inventory). Client-side sorters group their sort regions purely by
+  consecutive slots sharing one `Container` identity, so they saw one 30-slot region: a
+  filled saddle or armor slot passes the default pickup check, the 27 generic storage slots
+  have no placement restriction, and a "sort" swept equipment down into the grid. Vanilla's
+  own `HorseInventoryMenu` has the identical hazard for its saddle slot — this is a known
+  sorter-mod pitfall, not unique to this fork, so ClientSort ships no special case for it and
+  the durable fix has to be structural, on our side. The saddle/armor/chest slots now read
+  and write through a small delegating view (`DragonEquipmentContainer`) with its own
+  `Container` identity, splitting them into their own sort region from the storage grid —
+  every read/write still flows straight through to the SAME backing inventory at the same
+  indices, so the NBT format, sync packets, the global inventory store, and every hardcoded
+  slot-index calculation elsewhere are completely unaffected. Takes effect client-side (a
+  sorter inspects the client's own copy of the menu), which the lockstep client+server update
+  this release already requires covers automatically.
 - **Snapshot-clone self-healing, restructured for safety.** On the rare occasion a clone is
   minted anyway (a race the gate above narrows but cannot fully close), it no longer has to
   persist forever: the entity minted by the snapshot-respawn path (and by `/dmr recall`'s
@@ -143,6 +160,12 @@ first load of the updated mod.
   `POST_TELEPORT` region ticket's 5-tick lifespan instead of exactly matching it; and the
   malformed-dimension log-once guard is cleared on server stop along with the other
   transient in-memory state.
+- New `DragonEquipmentContainer` (`dmr.DragonMounts.server.container`) — the equipment-slot
+  sort-region view described above. Tests added to `CommunityRegressionTests`: the menu's
+  equipment/storage sort-region container-identity split, writes through an equipment slot
+  reaching the real backing inventory (and vice versa), a full 30-slot inventory NBT
+  round-trip proving the format is unaffected, and menu slot-id stability (protocol
+  compatibility with a mismatched client/server jar).
 
 ## [1.9.2-community.1] — 2026-08-07
 
