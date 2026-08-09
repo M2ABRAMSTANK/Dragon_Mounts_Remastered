@@ -10,6 +10,7 @@ import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModItems;
 import dmr.DragonMounts.server.container.DragonContainerMenu;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
+import dmr.DragonMounts.server.inventory.DragonInventoryHandler;
 import dmr.DragonMounts.server.inventory.DragonInventoryHandler.DragonInventory;
 import dmr.DragonMounts.server.items.DragonWhistleItem;
 import dmr.DragonMounts.server.worlddata.DragonWorldData;
@@ -1188,6 +1189,94 @@ public class CommunityRegressionTests {
                 || menu.getSlot(2).getContainerSlot() != 2) {
             helper.fail("Equipment slots' own container-local index (getContainerSlot()) drifted from 0/1/2 —"
                     + " the equipment view must be a 1:1 passthrough, not an offset");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Verify-round follow-up (a): a write through an equipment slot (routed through
+     * {@code DragonEquipmentContainer}) must still mark the dragon's
+     * {@code DragonInventory} dirty — the view adds no state of its own, so
+     * {@code setChanged()}/{@code setItem()} must delegate all the way through to the
+     * SAME backing {@code SimpleContainer} the {@code DragonInventory}'s
+     * {@code ContainerListener} is registered on, or dirty-tracking (and therefore
+     * saving/syncing) silently breaks for equipment specifically.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void dragonMenuEquipmentSlotWriteMarksInventoryDirty(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var menu = openDragonMenu(dragon, player);
+
+        var dragonInventory = DragonInventoryHandler.getOrCreateInventory(dragon);
+        // Clear whatever dirty state taming/spawning left behind so the assertion below
+        // is attributable to the write we're testing, not incidental setup noise.
+        dragonInventory.setDirty(false);
+
+        menu.getSlot(0).set(new ItemStack(Items.SADDLE));
+
+        if (!dragonInventory.isDirty()) {
+            helper.fail("Writing through the equipment view (slot 0, saddle) did not mark the DragonInventory"
+                    + " dirty — setChanged()/setItem() must delegate through to the backing container's"
+                    + " ContainerListener");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Verify-round follow-up (b): {@code DragonEquipmentContainer#clearContent()} must
+     * only ever clear ITS three indices (backing indices 0-2) — never the storage
+     * grid. A naive delegation (e.g. {@code backing.clearContent()}) would wipe the
+     * whole 30-slot inventory instead of just the equipment view's slice of it.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void dragonEquipmentViewClearContentScopedToEquipmentIndices(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var menu = openDragonMenu(dragon, player);
+
+        dragon.getInventory().setItem(0, new ItemStack(Items.SADDLE));
+        dragon.getInventory().setItem(1, new ItemStack(Items.SADDLE));
+        dragon.getInventory().setItem(2, new ItemStack(Items.CHEST));
+        dragon.getInventory().setItem(5, new ItemStack(Items.DIAMOND, 3));
+
+        // Call clearContent() on the VIEW (slot 0's container), not the backing
+        // container directly — this is exactly what a caller holding only the view
+        // (e.g. via the Slot) would do.
+        menu.getSlot(0).container.clearContent();
+
+        for (int i = 0; i <= 2; i++) {
+            if (!dragon.getInventory().getItem(i).isEmpty()) {
+                helper.fail("Equipment view's clearContent() did not clear backing index " + i);
+                return;
+            }
+        }
+
+        if (dragon.getInventory().getItem(5).isEmpty()) {
+            helper.fail(
+                    "Equipment view's clearContent() incorrectly cleared storage index 5, outside its 0-2" + " scope");
             return;
         }
 

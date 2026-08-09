@@ -15,6 +15,11 @@ verification round that found the provenance-flag fix itself still under-detecte
 real-death cases — all before any of it reached players. Full detail in
 `.fork-notes/wave5-spec.md`.
 
+A fourth, unrelated bug (dragon equipment getting scrambled by inventory-sorter mods) was
+found and fixed after those RC review rounds wrapped, and rode along in this same
+still-unreleased `community.2` rather than opening a `community.3` for one small,
+self-contained fix — see its own entry below.
+
 ### Fixed
 
 - **Silent summon failure.** `DragonWhistleHandler.summonDragon` returned `void`, so every
@@ -108,9 +113,15 @@ real-death cases — all before any of it reached players. Full detail in
   `Container` identity, splitting them into their own sort region from the storage grid —
   every read/write still flows straight through to the SAME backing inventory at the same
   indices, so the NBT format, sync packets, the global inventory store, and every hardcoded
-  slot-index calculation elsewhere are completely unaffected. Takes effect client-side (a
-  sorter inspects the client's own copy of the menu), which the lockstep client+server update
-  this release already requires covers automatically.
+  slot-index calculation elsewhere are completely unaffected. The same split also fixes a
+  second, previously-unnoticed instance of the identical bug class in plain VANILLA:
+  shift-double-clicking a stack ("quick-move all matching") walks every menu slot and moves
+  ANY slot that reports `Slot#isSameInventory` true (a `container` identity comparison,
+  `AbstractContainerScreen#mouseReleased:543`) — before this fix, double-clicking a stack in
+  the storage grid could also pull a matching item stack out of the saddle/armor/chest slots.
+  Takes effect client-side (both a sorter and vanilla's own double-click handler inspect the
+  client's own copy of the menu), which the lockstep client+server update this release
+  already requires covers automatically.
 - **Snapshot-clone self-healing, restructured for safety.** On the rare occasion a clone is
   minted anyway (a race the gate above narrows but cannot fully close), it no longer has to
   persist forever: the entity minted by the snapshot-respawn path (and by `/dmr recall`'s
