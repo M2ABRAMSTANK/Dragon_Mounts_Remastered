@@ -15,6 +15,7 @@ import dmr.DragonMounts.registry.ModSounds;
 import dmr.DragonMounts.server.entity.DragonConstants;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.items.DragonWhistleItem;
+import dmr.DragonMounts.server.worlddata.DragonWorldDataManager;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.util.ArrayList;
 import java.util.List;
@@ -326,14 +327,22 @@ public class DragonWhistleHandler {
     private static final int DEFERRED_SUMMON_TIMEOUT_TICKS = 60;
 
     /**
-     * How often (in ticks) a deferred summon's {@code findDragon} re-check runs while
-     * waiting for the deadline. Wave 5 review Blocker 2: the previous implementation
-     * called {@code findDragon} (and a blocking chunk-task drain) EVERY tick, which is
-     * unnecessary — chunk promotion is driven by the distance-manager/background
-     * executor on its own schedule, not by how often we poll it. Re-checking every 5
-     * ticks is still responsive (a quarter-second) while cutting the poll rate 5x.
+     * How often (in ticks) a deferred summon's {@code findDragon} re-check (and its
+     * region-ticket refresh) runs while waiting for the deadline. Wave 5 review
+     * Blocker 2: the previous implementation called {@code findDragon} (and a blocking
+     * chunk-task drain) EVERY tick, which is unnecessary — chunk promotion is driven by
+     * the distance-manager/background executor on its own schedule, not by how often we
+     * poll it. Re-checking every 4 ticks is still responsive while cutting the poll
+     * rate ~5x.
+     *
+     * <p>
+     * Verify-round polish #4: deliberately LESS than the {@code TicketType.POST_TELEPORT}
+     * region ticket's 5-tick lifespan (not equal to it) — refreshing at exactly the same
+     * cadence the ticket expires at leaves zero margin against normal tick-timing jitter
+     * (a GC pause, a slow tick elsewhere) letting the ticket lapse for one tick right
+     * before the refresh that was supposed to renew it.
      */
-    private static final int DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS = 5;
+    private static final int DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS = 4;
 
     private record DeferredSummon(UUID playerId, int index, int deadlineTick, int nextCheckTick) {}
 
@@ -391,8 +400,19 @@ public class DragonWhistleHandler {
                     if (alreadyPending) {
                         // Wave 5 review fix #10: a re-press during the deferral window is a
                         // no-op, not a fresh summon attempt — return false so summonDragon
-                        // does NOT stamp lastCall/cooldown for it (the sound already played
-                        // above; that's feedback enough that a summon is in progress).
+                        // does NOT stamp lastCall/cooldown for it.
+                        //
+                        // Verify-round polish #3: silently returning false here contradicted
+                        // Fix A's whole point (never leave the player with no feedback) —
+                        // reuses on_cooldown's wording ("You can't call your dragon yet!"),
+                        // which reads naturally for "something is already in progress, wait a
+                        // moment" without adding a new lang key.
+                        if (!player.level.isClientSide) {
+                            player.displayClientMessage(
+                                    Component.translatable("dmr.dragon_call.on_cooldown")
+                                            .withStyle(ChatFormatting.RED),
+                                    true);
+                        }
                         return false;
                     }
 
@@ -442,15 +462,10 @@ public class DragonWhistleHandler {
                 }
             }
 
-            // Wave 5 review Blocker 1: "confirmed dead" means the whistle slot has a
-            // recorded respawn-delay entry — set by DragonWhistleEvent#onEntityDeath and
-            // never cleared until consumed here (or by allow_respawn=false) — which only
-            // happens after canCall's own respawnDelays > 0 gate has already let this
-            // call through, i.e. the countdown reached zero. That is proof the ORIGINAL
-            // entity was removed by vanilla death, not evidence of a chunk-load race, so
-            // this mint is never a clone candidate.
-            boolean confirmedDead = cap.respawnDelays.containsKey(summonItemIndex);
-            return respawnDragonFromSnapshot(player, cap, summonItemIndex, confirmedDead);
+            // "Confirmed dead" (never a clone candidate) vs. "just can't find it" (might
+            // be a clone race) is decided inside respawnDragonFromSnapshot — see
+            // isConfirmedDead.
+            return respawnDragonFromSnapshot(player, cap, summonItemIndex);
         }
 
         return false;
@@ -488,9 +503,9 @@ public class DragonWhistleHandler {
 
             var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
 
-            // Keep the region ticket alive (POST_TELEPORT's lifespan is only 5 ticks,
-            // matching DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS so this refresh never lets
-            // it lapse).
+            // Keep the region ticket alive (POST_TELEPORT's lifespan is 5 ticks;
+            // DEFERRED_SUMMON_RECHECK_INTERVAL_TICKS=4 refreshes it with a 1-tick
+            // margin to spare, not exactly at expiry).
             var instance = cap.dragonInstances.get(pending.index());
             if (instance != null && instance.getLastPos() != null && instance.getDimension() != null) {
                 var storedLevel = resolveStoredLevel(server, instance);
@@ -512,10 +527,7 @@ public class DragonWhistleHandler {
                 summonExistingDragon(player, cap, pending.index(), dragon);
             } else if (tick >= pending.deadlineTick()) {
                 DEFERRED_SUMMONS.remove(pending);
-                // See callDragon's confirmedDead comment — same reasoning applies to a
-                // deferred summon that times out after a confirmed death.
-                boolean confirmedDead = cap.respawnDelays.containsKey(pending.index());
-                respawnDragonFromSnapshot(player, cap, pending.index(), confirmedDead);
+                respawnDragonFromSnapshot(player, cap, pending.index());
             } else {
                 DEFERRED_SUMMONS.remove(pending);
                 DEFERRED_SUMMONS.add(new DeferredSummon(
@@ -622,6 +634,74 @@ public class DragonWhistleHandler {
     }
 
     /**
+     * Wave 5 verify round (Blocker fix): is this whistle slot's dragon CONFIRMED dead —
+     * i.e. did vanilla death already remove the original entity — rather than merely
+     * "not found, might be a chunk-load race"? Two independent stores can record a
+     * death, and a mint must check BOTH or it under-detects:
+     *
+     * <ul>
+     * <li>{@code cap.respawnDelays.containsKey(index)} — set by
+     * {@code DragonWhistleEvent#onEntityDeath}'s ONLINE-owner branch. Traced gap: with
+     * {@code allow_respawn=true} and {@code respawn_time=0}, that branch used to skip
+     * writing this entry entirely (neither the {@code !allow_respawn} arm nor the old
+     * {@code respawn_time > 0} arm matched) — fixed there to always record an entry
+     * (value 0) when respawn is allowed, regardless of the configured delay.</li>
+     * <li>{@code DragonWorldDataManager.isDragonDead(level, dragonUUID)}, swept across
+     * every loaded level — set by {@code onEntityDeath}'s OFFLINE-owner branch, which
+     * also fires whenever the owner IS online but {@code TamableAnimal#getOwner()}'s
+     * level-scoped lookup can't see them (a cross-dimension death). That record is only
+     * ever copied into {@code respawnDelays} when the owner's {@code
+     * EntityJoinLevelEvent} next fires for the level the dragon died in — a summon
+     * attempted before that join (or in a session where it never happens) would see
+     * neither the entity nor a {@code respawnDelays} entry, so checking that alone
+     * under-detects. Checking the world-data record directly closes that gap.</li>
+     * </ul>
+     *
+     * <p>
+     * Callers that mint unflagged on a {@code true} result MUST consume whichever
+     * store(s) matched (see {@link #clearWorldDeathRecord}) so a later, genuine
+     * "can't find it, might be a race" mint for the same slot isn't wrongly treated as
+     * confirmed-dead too.
+     */
+    private static boolean isConfirmedDead(
+            MinecraftServer server, DragonOwnerCapability cap, int summonItemIndex, UUID dragonUUID) {
+        if (cap.respawnDelays.containsKey(summonItemIndex)) {
+            return true;
+        }
+
+        if (dragonUUID == null) {
+            return false;
+        }
+
+        for (var level : server.getAllLevels()) {
+            if (DragonWorldDataManager.isDragonDead(level, dragonUUID)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Consumes the world-data half of {@link #isConfirmedDead}'s death signal: clears
+     * {@code dragonUUID}'s dead-dragon record from every level that has one. Companion
+     * to the caller's own {@code cap.respawnDelays.remove(index)} for the
+     * capability-side half — together they make the "confirmed dead" signal one-shot
+     * regardless of which store it came from.
+     */
+    private static void clearWorldDeathRecord(MinecraftServer server, UUID dragonUUID) {
+        if (dragonUUID == null) {
+            return;
+        }
+
+        for (var level : server.getAllLevels()) {
+            if (DragonWorldDataManager.isDragonDead(level, dragonUUID)) {
+                DragonWorldDataManager.clearDragonData(level, dragonUUID);
+            }
+        }
+    }
+
+    /**
      * LAST RESORT (Wave 2): respawn the dragon from its NBT snapshot. This is the single
      * choke point every "the dragon didn't resolve" path funnels into — the deferred
      * (chunk-ticketed) summon's timeout in {@link #processDeferredSummons} and the
@@ -648,22 +728,16 @@ public class DragonWhistleHandler {
      * because {@code duplicate_resolution} defaults to LOG (never removes) as of this
      * wave, a wrongly-minted clone here is permanent, not recoverable.
      *
-     * @param confirmedDead Wave 5 review Blocker 1: true when this mint follows a
-     *                      recorded death (the caller found a {@code respawnDelays}
-     *                      entry for this whistle slot) — vanilla death already
-     *                      removed the original entity, so this mint can NEVER be a
-     *                      clone and must NOT be flagged {@code respawnedFromSnapshot}.
-     *                      The normal death -> respawn-delay -> whistle-call flow was
-     *                      minting flagged entities unconditionally, which meant every
-     *                      dragon that ever died and was re-summoned became eligible
-     *                      for the join-time reclaim to discard — including a
-     *                      player's live, legitimate dragon, if an unrelated unflagged
-     *                      legacy duplicate ever loaded nearby. Only the genuine
-     *                      "can't find it, might be a race" path (and {@code /dmr
-     *                      recall}) may flag a mint.
+     * <p>
+     * Wave 5 verify round: whether this mint follows a CONFIRMED death (see
+     * {@link #isConfirmedDead}) is now decided in here, from {@code cap} and
+     * {@code instance} — not threaded in from the caller — precisely because it needs
+     * to check TWO independent stores (the capability's {@code respawnDelays} and the
+     * per-level world-data dead-dragon record) and computing that at two separate call
+     * sites risked exactly the kind of drift that under-detected real deaths in the
+     * first place.
      */
-    private static boolean respawnDragonFromSnapshot(
-            Player player, DragonOwnerCapability cap, int summonItemIndex, boolean confirmedDead) {
+    private static boolean respawnDragonFromSnapshot(Player player, DragonOwnerCapability cap, int summonItemIndex) {
         // The binding can be cleaned up between a deferred summon's scheduling and its
         // re-check (canCall's invalid-data sweep, dragon death without respawn, ...);
         // createDragonEntity dereferences the instance, so bail here instead.
@@ -814,20 +888,25 @@ public class DragonWhistleHandler {
             return false;
         }
 
+        boolean confirmedDead = isConfirmedDead(server, cap, summonItemIndex, instance.getUUID());
+
         DMR.LOGGER.warn(
                 "Respawning dragon: {} from snapshot for player: {} — {}",
                 newDragon.getDragonUUID(),
                 player.getName().getString(),
                 confirmedDead
-                        ? "confirmed dead (respawn-delay entry present); minting unflagged"
+                        ? "confirmed dead (respawn-delay entry or world-data death record present); minting"
+                                + " unflagged"
                         : "no live entity found in its stored dimension");
 
         if (confirmedDead) {
-            // Wave 5 review Blocker 1(a): vanilla already removed the original on death —
-            // this can never be a clone. Do NOT flag it, and consume the respawn-delay
-            // entry that proved that so a LATER, genuine "can't find it" mint for this
-            // same slot isn't wrongly treated as confirmed-dead too.
+            // Wave 5 review Blocker 1(a) / verify round: vanilla already removed the
+            // original on death — this can never be a clone. Do NOT flag it, and
+            // consume whichever death record(s) proved that (isConfirmedDead's javadoc)
+            // so a LATER, genuine "can't find it" mint for this same slot isn't wrongly
+            // treated as confirmed-dead too.
             cap.respawnDelays.remove(summonItemIndex);
+            clearWorldDeathRecord(server, instance.getUUID());
         } else {
             // Wave 5, Fix B4: flag this entity as a snapshot-respawn clone BEFORE it
             // joins the level, so the join-time dedup check can prove (never guess)
@@ -1171,13 +1250,18 @@ public class DragonWhistleHandler {
     /**
      * How long (in ticks) a {@code respawnedFromSnapshot} flag is trusted as clone
      * proof, from its {@code snapshotMintGameTime} stamp (Wave 5 review Blocker 1(b)).
-     * ~7 in-game days (168000 = 7 * 24000). A clone that has survived unchallenged for
-     * that long has accrued its own progression (taming interactions, inventory,
-     * playtime) — silently discarding it on a stale flag would BE the duplication bug
-     * this mechanism exists to prevent, just delayed. Past the window (or with no
-     * recorded mint time — e.g. a legacy entity, or one flagged before this fix), a
-     * mismatch falls through to plain {@code duplicate_resolution=LOG} behavior: both
-     * entities survive, logged for operator triage.
+     * 168000 = 7 * 24000 — 7 IN-GAME days of {@code Level#getGameTime()}, which only
+     * advances while the server is actually ticking. At the standard 20 ticks/second
+     * that is only ~2h20m of real server UPTIME (168000 / 20 / 60 = 140 minutes) — NOT
+     * 7 real-world calendar days. Read literally as "7 days" this sounds like a
+     * generous window; an operator sizing it against actual playtime should use the
+     * ~2h20m figure. A clone that has survived unchallenged for that long has accrued
+     * its own progression (taming interactions, inventory, playtime) — silently
+     * discarding it on a stale flag would BE the duplication bug this mechanism exists
+     * to prevent, just delayed. Past the window (or with no recorded mint time — e.g. a
+     * legacy entity, or one flagged before this fix), a mismatch falls through to plain
+     * {@code duplicate_resolution=LOG} behavior: both entities survive, logged for
+     * operator triage.
      */
     public static final long SNAPSHOT_CLONE_EVIDENCE_WINDOW_TICKS = 168_000L;
 
@@ -1294,8 +1378,20 @@ public class DragonWhistleHandler {
             // original (not the clone's — the clone-era snapshot would resurrect
             // clone stats on the dragon's next death) and push the owner a fresh sync
             // so the client's binding/NBT aren't left stale.
+            //
+            // Verify-round polish #2: normalize sit/wander-target around the snapshot
+            // exactly like DragonOwnerCapability#setDragonToWhistle does for every
+            // OTHER whistle-bind snapshot — without this, a sitting/wandering original
+            // gets snapshotted mid-sit/mid-wander, and any FUTURE snapshot-respawn of
+            // this same dragon would mint it sitting.
             var cap = owner.getData(ModCapabilities.PLAYER_CAPABILITY);
+            var wanderPos = original.getWanderTarget();
+            var wasSitting = original.isOrderedToSit();
+            original.setWanderTarget(Optional.empty());
+            original.setOrderedToSit(false);
             var nbtData = original.serializeNBT(original.level.registryAccess());
+            original.setWanderTarget(wanderPos);
+            original.setOrderedToSit(wasSitting);
             cap.dragonNBTs.put(pending.index(), nbtData);
             cap.dragonInstances.put(pending.index(), new DragonInstance(original));
             cap.lastSummons.put(pending.index(), original.getUUID());
@@ -1406,9 +1502,17 @@ public class DragonWhistleHandler {
      * "deadline" the moment the world loads again — silently firing a snapshot respawn
      * or a clone reclaim the player never actually triggered this session. Call from
      * {@code ServerStoppingEvent} to guarantee neither queue survives a server stop.
+     *
+     * <p>
+     * Verify-round polish #5: also clears {@link #WARNED_MALFORMED_DIMENSIONS} — not
+     * itself a correctness issue (it only suppresses a log line), but there is no
+     * reason for a log-dedup set to outlive the session it was deduplicating within,
+     * and a fresh session deserves a fresh first warning if the same bad data is still
+     * there.
      */
     public static void clearTransientState() {
         DEFERRED_SUMMONS.clear();
         PENDING_RECLAIMS.clear();
+        WARNED_MALFORMED_DIMENSIONS.clear();
     }
 }

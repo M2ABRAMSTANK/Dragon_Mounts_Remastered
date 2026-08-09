@@ -2,6 +2,7 @@ package dmr.tests;
 
 import dmr.DMRTestConstants;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler;
+import dmr.DragonMounts.config.ServerConfig;
 import dmr.DragonMounts.network.packets.CompleteDataSync;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModCapabilities;
@@ -860,6 +861,151 @@ public class CommunityRegressionTests {
             helper.assertTrue(
                     !respawned.isRespawnedFromSnapshot(),
                     "Wave 5 review Blocker 1(a): a death-respawn mint must NOT be flagged as a snapshot clone");
+        });
+    }
+
+    /**
+     * Wave 5 verify round (Blocker, traced route (a)): with {@code allow_respawn=true}
+     * and {@code respawn_time=0} (a valid, minimum config value), {@code
+     * DragonWhistleEvent#onEntityDeath}'s online-owner branch used to match NEITHER its
+     * {@code !allow_respawn} arm NOR its old {@code respawn_time > 0} arm, so no {@code
+     * respawnDelays} entry was ever recorded for the death — the exact signal
+     * {@code isConfirmedDead} relies on. Triggers a REAL death (through the actual
+     * event handler, not a simulated end-state) to prove the handler itself now records
+     * the entry, then confirms the eventual respawn mint stays unflagged.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void deathRespawnMintIsNotFlaggedWithZeroRespawnTime(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+        DragonWhistleHandler.setDragon(player, dragon, 0);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == 0) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        // Narrow the mutable-global-config window to just the death trigger itself.
+        var previousAllowRespawn = ServerConfig.ALLOW_RESPAWN;
+        var previousRespawnTime = ServerConfig.RESPAWN_TIME;
+        ServerConfig.ALLOW_RESPAWN = true;
+        ServerConfig.RESPAWN_TIME = 0;
+        try {
+            dragon.kill();
+        } finally {
+            ServerConfig.ALLOW_RESPAWN = previousAllowRespawn;
+            ServerConfig.RESPAWN_TIME = previousRespawnTime;
+        }
+
+        if (!cap.respawnDelays.containsKey(0)) {
+            helper.fail("onEntityDeath did not record a respawnDelays entry for a respawn_time=0 death — the"
+                    + " traced coverage gap");
+            return;
+        }
+
+        if (!DragonWhistleHandler.summonDragon(player)) {
+            helper.fail("summonDragon returned false immediately after a respawn_time=0 death");
+            return;
+        }
+
+        helper.succeedWhen(() -> {
+            var respawned = DragonWhistleHandler.findDragon(player, 0);
+            helper.assertTrue(respawned != null, "Dragon was not respawned after a respawn_time=0 death");
+            helper.assertTrue(
+                    !respawned.isRespawnedFromSnapshot(),
+                    "Wave 5 verify round: a respawn_time=0 death-respawn mint must NOT be flagged as a snapshot"
+                            + " clone");
+        });
+    }
+
+    /**
+     * Wave 5 verify round (Blocker, traced route (b)): a dragon that dies in a
+     * dimension its owner is NOT currently in never populates {@code respawnDelays} —
+     * {@code TamableAnimal#getOwner()}'s level-scoped lookup can't see the owner, so
+     * {@code onEntityDeath} takes the offline/world-data branch and writes only a
+     * per-level {@code DragonWorldData} dead-dragon record. That record used to only
+     * ever get copied into {@code respawnDelays} when the owner's own {@code
+     * EntityJoinLevelEvent} next fired for THAT dimension; a summon attempted before
+     * that join (as here — the mock player never leaves the overworld) saw neither the
+     * entity nor a {@code respawnDelays} entry, so it minted flagged.
+     * {@code isConfirmedDead} now also sweeps world data directly, closing the gap.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void deathRespawnMintIsNotFlaggedAcrossDimensions(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+        DragonWhistleHandler.setDragon(player, dragon, 0);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == 0) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        var server = helper.getLevel().getServer();
+        var netherDim = server.getLevel(Level.NETHER);
+        if (netherDim == null) {
+            helper.fail("Nether level is not available");
+            return;
+        }
+
+        // Send the dragon to the Nether WITHOUT the owner (the mock player stays in the
+        // overworld gametest structure) — the exact shape of a wandered-off/ridden-away
+        // dragon dying somewhere its owner isn't.
+        var toNether = new DimensionTransition(
+                netherDim, new Vec3(0, 100, 0), new Vec3(0, 0, 0), 0, 0, true, DimensionTransition.DO_NOTHING);
+        var netherDragon = (TameableDragonEntity) dragon.changeDimension(toNether);
+        if (netherDragon == null) {
+            helper.fail("Dimension change to the Nether returned null");
+            return;
+        }
+
+        netherDragon.kill();
+
+        if (cap.respawnDelays.containsKey(0)) {
+            helper.fail("respawnDelays was populated by a cross-dimension death without the owner ever"
+                    + " (re)joining that dimension — test setup invalid, this should be impossible");
+            return;
+        }
+
+        if (!DragonWhistleHandler.summonDragon(player)) {
+            helper.fail("summonDragon returned false immediately after a cross-dimension death");
+            return;
+        }
+
+        helper.succeedWhen(() -> {
+            var respawned = DragonWhistleHandler.findDragon(player, 0);
+            helper.assertTrue(respawned != null, "Dragon was not respawned after a cross-dimension death");
+            helper.assertTrue(
+                    !respawned.isRespawnedFromSnapshot(),
+                    "Wave 5 verify round: a cross-dimension death-respawn mint must NOT be flagged as a snapshot"
+                            + " clone (respawnDelays never populated; isConfirmedDead must fall back to the"
+                            + " world-data record)");
         });
     }
 }

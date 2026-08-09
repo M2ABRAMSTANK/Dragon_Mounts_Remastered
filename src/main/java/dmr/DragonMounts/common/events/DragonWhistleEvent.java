@@ -257,14 +257,29 @@ public class DragonWhistleEvent {
                         state.dragonNBTs.remove(index);
                         state.respawnDelays.remove(index);
                         PacketDistributor.sendToPlayer((ServerPlayer) player, new CompleteDataSync(player));
-                    } else if (ServerConfig.RESPAWN_TIME > 0) {
+                    } else {
+                        // Wave 5 verify-round fix: this used to be `else if (RESPAWN_TIME >
+                        // 0)`, so with allow_respawn=true and respawn_time=0 (a valid,
+                        // minimum config value — "respawn instantly") NEITHER branch ran and
+                        // no respawnDelays entry was ever recorded for this death. That
+                        // entry is also DragonWhistleHandler#isConfirmedDead's primary
+                        // "this whistle slot's dragon really did die" signal — without it, an
+                        // otherwise completely ordinary respawn was minting a dragon flagged
+                        // as a snapshot clone (and therefore permanently eligible for the
+                        // join-time reclaim to discard). Always record an entry when respawn
+                        // is allowed, at whatever delay is configured — including 0, the same
+                        // shape a normal countdown leaves once it reaches zero — so that
+                        // signal exists regardless of respawn_time.
                         var state = player.getData(ModCapabilities.PLAYER_CAPABILITY);
-                        state.respawnDelays.put(index, ServerConfig.RESPAWN_TIME * 20);
+                        var delayTicks = Math.max(0, ServerConfig.RESPAWN_TIME * 20);
+                        state.respawnDelays.put(index, delayTicks);
 
-                        var whistle = ModItems.DRAGON_WHISTLES.get(index).get();
+                        if (delayTicks > 0) {
+                            var whistle = ModItems.DRAGON_WHISTLES.get(index).get();
 
-                        if (!player.getCooldowns().isOnCooldown(whistle)) {
-                            player.getCooldowns().addCooldown(whistle, ServerConfig.RESPAWN_TIME * 20);
+                            if (!player.getCooldowns().isOnCooldown(whistle)) {
+                                player.getCooldowns().addCooldown(whistle, delayTicks);
+                            }
                         }
 
                         if (player instanceof ServerPlayer serverPlayer) {

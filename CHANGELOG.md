@@ -9,9 +9,11 @@ investigation (file:line references, upstream issue/commit history, advisor ruli
 
 Two operator bug reports against the `community.1` RC: summoning with insufficient room
 failed with no feedback, and cross-dimension summons could still mint a duplicate dragon
-under a chunk-loading race. Shipped in two passes — the initial fix, then an adversarial
-review round that caught a critical provenance-flag bug and a main-thread stall before
-either reached players. Full detail in `.fork-notes/wave5-spec.md`.
+under a chunk-loading race. Shipped in three passes — the initial fix, an adversarial
+review round that caught a critical provenance-flag bug and a main-thread stall, and a
+verification round that found the provenance-flag fix itself still under-detected two
+real-death cases — all before any of it reached players. Full detail in
+`.fork-notes/wave5-spec.md`.
 
 ### Fixed
 
@@ -64,17 +66,31 @@ either reached players. Full detail in `.fork-notes/wave5-spec.md`.
   already existed somewhere. It now sweeps all loaded levels first and refuses (naming the
   live entity's dimension and position) instead of minting a copy.
 - **A death-respawned dragon was permanently eligible for self-healing discard** (critical
-  fix from the review round). The clone-provenance flag below was being set on EVERY
+  fix from the review round; the detection itself had to be fixed again in the
+  verification round). The clone-provenance flag below was being set on EVERY
   snapshot-respawn mint, including the completely ordinary "my dragon died, the respawn
   timer ran out, I called it back" flow — vanilla death had already removed the original,
   so that mint could never actually be a clone, but it still got flagged as one forever.
   Any dragon that had ever died and been re-summoned was thus permanently eligible for the
   join-time reclaim below to discard it, given nothing more than an unrelated stale/legacy
-  duplicate loading nearby. A mint that follows a recorded death (a `respawnDelays` entry
-  for that whistle slot) is now never flagged. Flagged mints (the genuine "can't find it,
+  duplicate loading nearby. A mint that follows a recorded death is now never flagged — but
+  "recorded" turned out to have two independent, incomplete signals that each needed
+  fixing: (1) the ONLINE-owner death handler recorded nothing at all when
+  `allow_respawn = true` and `respawn_time = 0` (a valid, minimum config value — neither
+  its `!allow_respawn` branch nor its old `respawn_time > 0` branch matched), now always
+  recorded regardless of the configured delay; (2) a death in a dimension the owner isn't
+  currently in (`TamableAnimal#getOwner()`'s owner lookup is level-scoped) only wrote a
+  world-data record, which only ever got copied into the capability-side `respawnDelays`
+  entry the confirmed-death check originally looked at when the owner's own
+  `EntityJoinLevelEvent` next fired for that dimension — a summon attempted before that
+  join saw neither the entity nor that entry, and still minted flagged. The confirmed-death
+  check now consults both stores (and consumes whichever one matched, so it stays one-shot
+  either way). Flagged mints (the genuine "can't find it,
   might be a chunk-load race" path, and `/dmr recall`) additionally carry a mint-time
   stamp; the flag is only trusted as clone-proof within roughly 7 in-game days of that
-  stamp — past that window (or with no stamp at all, e.g. legacy data), a same-`dragonUUID`
+  stamp — 168000 game ticks, which is **~2h20m of actual server uptime** at 20 ticks/sec,
+  not 7 real-world calendar days — past that window (or with no stamp at all, e.g. legacy
+  data), a same-`dragonUUID`
   mismatch falls through to plain `duplicate_resolution = LOG` logging instead of an
   automatic reclaim, because a "clone" that survived unchallenged that long has almost
   certainly accrued its own legitimate progression.
@@ -115,10 +131,18 @@ first load of the updated mod.
 
 - Wave 5 regression tests added to `CommunityRegressionTests` (return-value plumbing,
   reclaim + its passenger-guard and stale-evidence-window variants, a confirmed-death mint
-  staying unflagged, and the malformed-dimension guard) plus a plain JUnit suite
-  (`DragonWhistleHandlerLogicTests`) covering the honest-gate decision table, the
-  malformed-dimension guard, and the search-box/ticket-radius chunk-boundary math
-  exhaustively across every chunk-alignment offset.
+  staying unflagged including the `respawn_time = 0` branch, and the malformed-dimension
+  guard) plus a plain JUnit suite (`DragonWhistleHandlerLogicTests`) covering the
+  honest-gate decision table, the malformed-dimension guard, and the search-box/ticket-radius
+  chunk-boundary math exhaustively across every chunk-alignment offset.
+- Verification-round polish: a reclaimed original's NBT snapshot is now taken through the
+  same sit/wander-target normalization `DragonOwnerCapability#setDragonToWhistle` applies
+  (a sitting original was otherwise getting snapshotted mid-sit); a re-press during a
+  deferred summon's wait now gets a small action-bar instead of silent failure; the
+  deferred-summon re-check interval (4 ticks) now has a 1-tick margin under the
+  `POST_TELEPORT` region ticket's 5-tick lifespan instead of exactly matching it; and the
+  malformed-dimension log-once guard is cleared on server stop along with the other
+  transient in-memory state.
 
 ## [1.9.2-community.1] — 2026-08-07
 
