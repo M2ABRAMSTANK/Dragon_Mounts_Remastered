@@ -484,4 +484,211 @@ public class CommunityRegressionTests {
 
         helper.succeed();
     }
+
+    /**
+     * Wave 5, T1 (Fix A1): a player with no whistle and no bound dragon at all must get
+     * {@code false} back from {@code summonDragon} — not a silently-discarded failure.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void summonDragonReturnsFalseWithoutBoundDragon(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        if (DragonWhistleHandler.summonDragon(player)) {
+            helper.fail("summonDragon returned true for a player with no whistle/bound dragon at all");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Wave 5, T1 (Fix A1): a player with a whistle bound to a valid, nearby dragon must
+     * get {@code true} back from {@code summonDragon} — the return value must propagate
+     * {@code callDragon}'s real result, not a hardcoded value.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void summonDragonReturnsTrueForValidNearbyDragon(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+        DragonWhistleHandler.setDragon(player, dragon, 0);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == 0) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        if (!DragonWhistleHandler.summonDragon(player)) {
+            helper.fail("summonDragon returned false for a player with a valid nearby bound dragon");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Wave 5, T2 (Fix B4): when two live dragons share one dragonUUID and EXACTLY ONE is
+     * flagged {@code respawnedFromSnapshot}, the join-time dedup check must reclaim
+     * (discard) ONLY the flagged clone and re-point the whistle binding at the proven
+     * original — never the reverse.
+     *
+     * <p>
+     * Setup mirrors the real race this defends against: {@code respawnDragonFromSnapshot}
+     * mints a flagged clone and points the binding at it; the real (unflagged) original
+     * then re-joins (simulated here via serialize/discard/reload, same technique as
+     * {@link #unboundDragonSurvivesChunkReload}) — which is exactly when the join-time
+     * dedup mismatch fires.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void snapshotCloneReclaimedWhenProven(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        // The "original": tamed normally, never touched the snapshot-respawn path —
+        // respawnedFromSnapshot stays false.
+        var original = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        original.setBreed(DragonBreedsRegistry.getDefault());
+        original.tamedFor(player, true);
+
+        // The "clone": a second dragon sharing the SAME dragonUUID, flagged the way the
+        // real respawnDragonFromSnapshot path flags its mint.
+        var clone = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS.offset(4, 0, 0));
+        clone.setBreed(DragonBreedsRegistry.getDefault());
+        clone.setDragonUUID(original.getDragonUUID());
+        clone.setRespawnedFromSnapshot(true);
+
+        // Bind the whistle at the CLONE — mirrors respawnDragonFromSnapshot re-pointing
+        // the binding at the entity it just minted.
+        DragonWhistleHandler.setDragon(player, clone, 0);
+
+        var originalUuid = original.getUUID();
+        var tag = new CompoundTag();
+        if (!original.save(tag)) {
+            helper.fail("Failed to serialize the original dragon");
+            return;
+        }
+        original.discard();
+
+        var reloaded = EntityType.loadEntityRecursive(tag, helper.getLevel(), entity -> entity);
+        if (reloaded == null) {
+            helper.fail("Failed to deserialize the original dragon");
+            return;
+        }
+
+        if (!helper.getLevel().addFreshEntity(reloaded)) {
+            helper.fail("Original dragon failed to (re)join the level");
+            return;
+        }
+
+        // The join handler queues the clone's discard for the NEXT server tick rather
+        // than discarding synchronously (CME/ghost-entity risk inside
+        // EntityJoinLevelEvent) — run that queue directly instead of waiting on a real
+        // tick.
+        DragonWhistleHandler.processPendingReclaims(helper.getLevel().getServer());
+
+        if (clone.isAlive()) {
+            helper.fail("Flagged snapshot clone was not reclaimed (discarded) after the proven original re-joined");
+            return;
+        }
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        var boundUuid = cap.lastSummons.get(0);
+        if (boundUuid == null || !boundUuid.equals(originalUuid)) {
+            helper.fail("Whistle binding was not re-pointed at the original after the clone was reclaimed");
+            return;
+        }
+
+        var found = DragonWhistleHandler.findDragon(player, 0);
+        if (found == null || !found.getUUID().equals(originalUuid)) {
+            helper.fail("Original dragon is not findable via the whistle binding after the reclaim");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Wave 5, T2 passenger-guard variant (Fix B4): a flagged clone currently carrying a
+     * passenger must be left alone (log only) — both entities survive.
+     *
+     * @param helper The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void snapshotCloneReclaimSkippedWithPassenger(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var original = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        original.setBreed(DragonBreedsRegistry.getDefault());
+        original.tamedFor(player, true);
+
+        var clone = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS.offset(4, 0, 0));
+        clone.setBreed(DragonBreedsRegistry.getDefault());
+        clone.setDragonUUID(original.getDragonUUID());
+        clone.setRespawnedFromSnapshot(true);
+
+        // Give the clone a passenger — the reclaim must refuse to touch it.
+        var passenger = helper.spawn(EntityType.CHICKEN, DMRTestConstants.TEST_POS.offset(4, 0, 0));
+        if (!passenger.startRiding(clone, true)) {
+            helper.fail("Test setup failed: passenger could not mount the clone");
+            return;
+        }
+
+        DragonWhistleHandler.setDragon(player, clone, 0);
+
+        var tag = new CompoundTag();
+        if (!original.save(tag)) {
+            helper.fail("Failed to serialize the original dragon");
+            return;
+        }
+        original.discard();
+
+        var reloaded = EntityType.loadEntityRecursive(tag, helper.getLevel(), entity -> entity);
+        if (reloaded == null) {
+            helper.fail("Failed to deserialize the original dragon");
+            return;
+        }
+
+        if (!helper.getLevel().addFreshEntity(reloaded)) {
+            helper.fail("Original dragon failed to (re)join the level");
+            return;
+        }
+
+        DragonWhistleHandler.processPendingReclaims(helper.getLevel().getServer());
+
+        if (!clone.isAlive()) {
+            helper.fail("Passenger-carrying snapshot clone was reclaimed (discarded) despite having a passenger");
+            return;
+        }
+
+        if (!reloaded.isAlive()) {
+            helper.fail("Original dragon did not survive the passenger-guard scenario");
+            return;
+        }
+
+        helper.succeed();
+    }
 }

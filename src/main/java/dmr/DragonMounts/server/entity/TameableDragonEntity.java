@@ -3,6 +3,7 @@ package dmr.DragonMounts.server.entity;
 import com.mojang.serialization.Dynamic;
 import dmr.DragonMounts.DMR;
 import dmr.DragonMounts.ModConstants;
+import dmr.DragonMounts.ModConstants.NBTConstants;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler.DragonInstance;
 import dmr.DragonMounts.config.ServerConfig;
@@ -13,6 +14,8 @@ import dmr.DragonMounts.server.inventory.DragonInventoryHandler.DragonInventory;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.util.Optional;
 import lombok.Getter;
+import lombok.Setter;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.DebugPackets;
 import net.minecraft.network.syncher.EntityDataAccessor;
@@ -40,8 +43,37 @@ import org.jetbrains.annotations.Nullable;
 @Getter
 public class TameableDragonEntity extends AbstractDragonEntity {
 
+    /**
+     * Wave 5, Fix B4: set true ONLY on the entity minted by {@code
+     * DragonWhistleHandler#respawnDragonFromSnapshot} (and {@code DMRCommand}'s
+     * {@code /dmr recall}, a second minting path) — never on a tamed/hatched dragon.
+     * Pure clone provenance: if a genuine snapshot-clone race ever slips past the
+     * summon path's honest gate (Fix B2), the join-time dedup check
+     * (DragonWhistleEvent#onEntityJoinWorld) can PROVE which of two same-dragonUUID
+     * entities is the clone and self-heal by reclaiming (discarding) it — instead of
+     * guessing from binding staleness, which is the destructive AGGRESSIVE bug this
+     * replaces. Not synced to the client (server-only bookkeeping); persisted via
+     * addAdditionalSaveData/readAdditionalSaveData so it survives a chunk reload.
+     */
+    @Setter
+    private boolean respawnedFromSnapshot = false;
+
     public TameableDragonEntity(EntityType<? extends TamableAnimal> pEntityType, Level pLevel) {
         super(pEntityType, pLevel);
+    }
+
+    @Override
+    public void addAdditionalSaveData(CompoundTag compound) {
+        super.addAdditionalSaveData(compound);
+        compound.putBoolean(NBTConstants.RESPAWNED_FROM_SNAPSHOT, respawnedFromSnapshot);
+    }
+
+    @Override
+    public void readAdditionalSaveData(CompoundTag compound) {
+        super.readAdditionalSaveData(compound);
+        if (compound.contains(NBTConstants.RESPAWNED_FROM_SNAPSHOT)) {
+            respawnedFromSnapshot = compound.getBoolean(NBTConstants.RESPAWNED_FROM_SNAPSHOT);
+        }
     }
 
     @Override

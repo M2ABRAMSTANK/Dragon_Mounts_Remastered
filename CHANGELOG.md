@@ -5,6 +5,76 @@ changelog; this file starts at the fork's first release. See [`readme.md`](readm
 the fork's status and scope, and [`.fork-notes/`](.fork-notes/) for the full technical
 investigation (file:line references, upstream issue/commit history, advisor rulings).
 
+## [1.9.2-community.2] — 2026-08-09
+
+Two operator bug reports against the `community.1` RC: summoning with insufficient room
+failed with no feedback, and cross-dimension summons could still mint a duplicate dragon
+under a chunk-loading race. Full detail in `.fork-notes/wave5-spec.md`.
+
+### Fixed
+
+- **Silent summon failure.** `DragonWhistleHandler.summonDragon` returned `void`, so every
+  failure reason (no space, no dragon, riding, on cooldown, dead/respawning, not found,
+  teleport blocked) was computed and then discarded. Worse, the radial whistle-menu path
+  (`DragonCommandPacket`) sent an unconditional "whistle" action-bar on every attempt,
+  which — landing in the same tick as any failure message — always won the client's
+  last-message-wins action-bar rendering and silently swallowed it. `summonDragon` now
+  returns whether the summon actually succeeded, and the unconditional action-bar is only
+  sent on success; several previously-bare `return`s (a whistle-less player, a desynced
+  binding, a snapshot respawn that can't be confirmed) now message the player instead of
+  failing silently, reusing the existing `dmr.dragon_call.*` lang keys.
+- **Vacuous entity-residency gate could still mint a snapshot clone** (a `community.1`-era
+  regression of #125). The snapshot-respawn "is the dragon really gone" check only probed
+  the single chunk the summon path itself had just force-loaded via its region ticket —
+  proving the ticket worked, not that the dragon was absent from the wider area the rescue
+  scan actually reads. The gate now requires EVERY chunk in that scanned area (up to 9x9
+  chunks around the dragon's last known position) to have positively reached entity-loaded
+  status before an empty read anywhere in it is trusted; the decision logic is extracted
+  into a pure, unit-tested helper (`decideSnapshotRespawn`). The region ticket radius that
+  holds those chunks open is widened (2 -> 4 chunks) to actually cover the area the gate and
+  rescue scan both read, and the deferred-summon timeout that used to green-light a clone on
+  expiry is both widened (20 -> 60 ticks, a cold chunk load can exceed 1 second) and now
+  fails safe on expiry (a message, never a clone).
+- **Malformed-dimension crash/clone hole in three more readers.** Wave 1 fixed the one
+  *writer* that produced legacy `ResourceKey#toString()` dimension strings
+  (`"ResourceKey[minecraft:dimension / minecraft:overworld]"`); three summon-path *readers*
+  (plus a fourth introduced with Wave 2's cross-dimension work) still parsed that string
+  unguarded and would throw. All four now go through one `resolveStoredLevel` helper that
+  treats a malformed or unknown dimension as "unknown" — logged once, never thrown, never
+  treated as a reason to clone.
+- **`/dmr recall` was a second clone-minting vector.** The recall command rebuilt a dragon
+  from its history snapshot without checking whether a live entity with that `dragonUUID`
+  already existed somewhere. It now sweeps all loaded levels first and refuses (naming the
+  live entity's dimension and position) instead of minting a copy.
+- **Snapshot-clone self-healing.** On the rare occasion a clone is minted anyway (a race the
+  gate above narrows but cannot fully close — see `reclaim_snapshot_clones` below), it no
+  longer has to persist forever: the entity minted by the snapshot-respawn path (and by
+  `/dmr recall`'s rebuild path) is now flagged with clone provenance at creation. If the
+  join-time duplicate check ever finds two live same-`dragonUUID` entities where EXACTLY
+  ONE carries that flag, it can PROVE which one is the clone (never guess from binding
+  staleness, the destructive pre-Wave-2 `AGGRESSIVE` failure mode) and reclaim it: the
+  flagged clone is discarded (skipped, log-only, if it currently has a passenger) and the
+  whistle binding is re-pointed at the proven original — on the next server tick, never
+  synchronously inside the join event.
+
+### Added config
+
+Additive — existing config files are untouched; the new key is written with its default on
+first load of the updated mod.
+
+- `[whistle] reclaim_snapshot_clones = true` (**default: `true`**). Enables the self-healing
+  reclaim described above. Entirely separate from `duplicate_resolution` (unchanged this
+  release): it never runs when `duplicate_resolution = AGGRESSIVE` is active (that mode's
+  existing join-cancel behavior is left alone to avoid a double-removal race), and even when
+  it does run it only ever discards an entity PROVEN to be a snapshot clone, never guesses,
+  and never removes a dragon carrying a passenger.
+
+### Internal
+
+- Wave 5 regression tests added to `CommunityRegressionTests` (return-value plumbing,
+  reclaim + its passenger-guard variant, the honest-gate decision table as a plain JUnit
+  unit test, and the malformed-dimension guard).
+
 ## [1.9.2-community.1] — 2026-08-07
 
 First release of the community fork, picking up DMR 1.9.2 after upstream archival

@@ -213,6 +213,18 @@ public class ServerConfig {
     public static int MAX_FOLLOW_DISTANCE = 8;
 
     @Config(
+            key = "reclaim_snapshot_clones",
+            comment = {
+                "Self-heal a proven snapshot-respawn clone: when the whistle dedup check finds two live dragons",
+                "sharing one dragonUUID and EXACTLY ONE of them is flagged as a snapshot-respawn clone, discard",
+                "ONLY the flagged one (never the original) and re-point the owner's binding at the original.",
+                "This is separate from duplicate_resolution above — it never guesses from binding staleness,",
+                "only acts on provable clone provenance, and never removes a passenger-carrying dragon."
+            },
+            category = "whistle")
+    public static boolean RECLAIM_SNAPSHOT_CLONES = true;
+
+    @Config(
             key = "persist_hatched_dragons",
             comment = {
                 "Mark hatched dragons as persistence-required so they never despawn naturally,",

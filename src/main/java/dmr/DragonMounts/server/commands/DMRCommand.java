@@ -236,6 +236,29 @@ public class DMRCommand {
     }
 
     private static int runRecall(CommandSourceStack source, UUID id, Vec3 position) {
+        // Wave 5, Fix B6: /dmr recall is a second minting path for the same clone bug
+        // the whistle summon path guards against (Fix B2) — rebuilding from the
+        // dragonHistory snapshot while a live entity with this dragonUUID is already
+        // loaded somewhere would mint a duplicate. Refuse instead, naming where the
+        // live one already is (no new lang key: a plain literal, matching this
+        // command's other diagnostic output — see runDuplicates above).
+        for (ServerLevel candidateLevel : source.getServer().getAllLevels()) {
+            var liveMatches = candidateLevel.getEntities(
+                    ModEntities.DRAGON_ENTITY.get(),
+                    (TameableDragonEntity candidate) -> id.equals(candidate.getDragonUUID()));
+            if (!liveMatches.isEmpty()) {
+                var existing = liveMatches.getFirst();
+                source.sendFailure(Component.literal(String.format(
+                        "Dragon %s already exists in %s at (%.1f, %.1f, %.1f) — refusing to recall a copy",
+                        id,
+                        existing.level().dimension().location(),
+                        existing.getX(),
+                        existing.getY(),
+                        existing.getZ())));
+                return 0;
+            }
+        }
+
         DragonHistory history = DragonWorldDataManager.getDragonHistory(source.getLevel(), id);
         CompoundTag nbt = history != null ? history.compoundTag() : null;
         if (nbt != null) {
@@ -249,6 +272,11 @@ public class DMRCommand {
                     dragon.setUUID(id);
                     dragon.setPos(position.x, position.y, position.z);
                     dragon.setHealth(Math.max(1, dragon.getHealth()));
+                    // Wave 5, Fix B4/B6: recall mints a fresh entity from a snapshot just
+                    // like the whistle summon path's last resort — flag it with the same
+                    // provenance so the join-time dedup check can reclaim it if this ever
+                    // races a still-live original.
+                    dragon.setRespawnedFromSnapshot(true);
                     level.addFreshEntity(dragon);
                 }
             }

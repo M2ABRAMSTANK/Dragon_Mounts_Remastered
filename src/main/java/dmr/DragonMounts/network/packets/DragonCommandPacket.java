@@ -8,6 +8,7 @@ import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.util.Optional;
 import lombok.Getter;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.GlobalPos;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
@@ -93,6 +94,10 @@ public class DragonCommandPacket extends AbstractMessage<DragonCommandPacket> {
         var whistleItem = DragonWhistleHandler.getDragonWhistleItem(player);
 
         if (whistleItem == null) {
+            // Wave 5, Fix A3: this bare return previously left the player with no
+            // feedback at all — reuses the existing whistle-summon lang key.
+            player.displayClientMessage(
+                    Component.translatable("dmr.dragon_call.no_whistle").withStyle(ChatFormatting.RED), true);
             return;
         }
 
@@ -100,13 +105,23 @@ public class DragonCommandPacket extends AbstractMessage<DragonCommandPacket> {
         var state = PlayerStateUtils.getHandler(player);
         var instance = state.dragonInstances.get(index);
         if (instance == null) {
+            // Wave 5, Fix A3: ditto — same bare-return silence.
+            player.displayClientMessage(
+                    Component.translatable("dmr.dragon_call.nodragon").withStyle(ChatFormatting.RED), true);
             return;
         }
 
         var cmd = Command.values()[command];
         if (cmd == Command.WHISTLE) {
-            DragonWhistleHandler.summonDragon(player);
-            player.displayClientMessage(Component.translatable("dmr.command_mode.whistle.text"), true);
+            // Wave 5, Fix A2: only send the "whistle" action-bar on an actual success.
+            // Both this and any failure message summonDragon sends land in the same
+            // tick, and the client only renders the LAST one it receives — sending this
+            // unconditionally used to always win, silently swallowing nospace/nodragon/
+            // riding/respawn/on_cooldown/not_found/teleport_blocked on this (radial-menu)
+            // path.
+            if (DragonWhistleHandler.summonDragon(player)) {
+                player.displayClientMessage(Component.translatable("dmr.command_mode.whistle.text"), true);
+            }
             return;
         }
 

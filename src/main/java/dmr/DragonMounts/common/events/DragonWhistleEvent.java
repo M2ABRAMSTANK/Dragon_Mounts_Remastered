@@ -36,6 +36,10 @@ public class DragonWhistleEvent {
         // Wave 2: re-checks summons that were deferred because the bound dragon's chunk
         // was not loaded (chunk-ticket path in DragonWhistleHandler.callDragon).
         DragonWhistleHandler.processDeferredSummons(event.getServer());
+        // Wave 5, Fix B4: discards any snapshot clones proven-and-queued by
+        // onEntityJoinWorld's dedup check below. Never discarded synchronously from
+        // inside EntityJoinLevelEvent itself (CME/ghost-entity risk).
+        DragonWhistleHandler.processPendingReclaims(event.getServer());
     }
 
     @SubscribeEvent
@@ -107,12 +111,28 @@ public class DragonWhistleEvent {
                             }
 
                             if (resolution == ServerConfig.DuplicateResolution.AGGRESSIVE) {
+                                // duplicate_resolution semantics are NOT changed by reclaim
+                                // (Wave 5 spec): AGGRESSIVE already cancels the JOINING
+                                // entity below, unconditionally. Running reclaim first could
+                                // re-point the binding at that same joining entity and then
+                                // have this cancel refuse its join anyway — losing BOTH
+                                // entities. Leave AGGRESSIVE's pre-existing behavior alone;
+                                // reclaim only ever runs under OFF/LOG.
+                                //
                                 // Cancelling the join event is the only removal mechanism
                                 // permitted here — never remove/discard an entity from inside
                                 // EntityJoinLevelEvent (CME/ghost-entity risk, advisor B4).
                                 event.setCanceled(true);
                                 return;
                             }
+
+                            // Wave 5, Fix B4: independent of duplicate_resolution — only ever
+                            // acts on a PROVEN snapshot-clone (the respawnedFromSnapshot
+                            // provenance flag), never a guess based on binding staleness (the
+                            // destructive AGGRESSIVE bug this mechanism was built to avoid
+                            // repeating). Safe here: it only mutates capability data and
+                            // queues a LATER discard — it never discards synchronously.
+                            DragonWhistleHandler.maybeReclaimSnapshotClone(dragon, player, index, expectedEntityId);
                         }
                     }
                 }

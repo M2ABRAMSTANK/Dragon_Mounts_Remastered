@@ -35,5 +35,7 @@ public class ModConstants {
         public static final String VARIANT = "variant";
         public static final String ORDERED_TO_SIT = "OrderedToSit";
         public static final String WAS_HATCHED = "wasHatched";
+        /** Wave 5, Fix B4: snapshot-respawn clone provenance flag. */
+        public static final String RESPAWNED_FROM_SNAPSHOT = "respawnedFromSnapshot";
     }
 }
