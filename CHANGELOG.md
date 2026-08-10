@@ -5,6 +5,53 @@ changelog; this file starts at the fork's first release. See [`readme.md`](readm
 the fork's status and scope, and [`.fork-notes/`](.fork-notes/) for the full technical
 investigation (file:line references, upstream issue/commit history, advisor rulings).
 
+## [1.9.2-community.3] — 2026-08-09
+
+`1.9.2-community.2` jars were already built and distributed by the time this was found,
+so the fix ships as a new version rather than amending an immutable release. Client-side
+only — see **Compatibility** below.
+
+### Fixed
+
+- **Fixed an upstream rendering bug present since 1.9.0: dragon stat bars (and their
+  labels) could be hidden behind the stats panel backdrop.** Verified byte-identical to
+  upstream v1.9.2 (introduced upstream `c6e67f8`) — not a fork regression.
+  `DragonInventoryScreen` drew the stats-panel backdrop sprite (`advancements/title_box`)
+  in `render()`, AFTER the four `StatButton` widgets (health/damage/speed/scale bars) had
+  already been drawn — its geometry fully overlaps all four. The bars only stayed visible
+  through a `pose.translate(0, 0, 100)` GUI-depth-test Z-trick in
+  `StatButton#renderWidget`, which silently breaks whenever depth testing happens to be
+  off during widget render (a shader/optimization mod, or any
+  `ContainerScreenEvent.Render.Background` handler that leaves it disabled) — which is
+  why some players saw the bars and others didn't. The stat label/value TEXT was never
+  protected by that trick at all (`GuiGraphics` buffers text and flushes it without
+  preserving the Z push), so the text was hidden behind the backdrop even on a
+  completely stock client, every time, regardless of the depth-test race. The backdrop
+  now draws in `renderBg()`, which runs before any widget — under the bars/text by
+  normal paint order, not by depth-buffer luck — and the now-pointless Z-translate hack
+  is removed entirely.
+- **Also corrected bar texture sampling** (squished bar, misaligned tick mark): the bar
+  blits passed a texture width of 80, but `dragon_inventory_stats.png` is actually 89
+  pixels wide, so the full 89px texture was being squeezed to fit an 80px destination.
+  Now samples the correct 80-of-89 texture pixels at a 1:1 pixel mapping (the widget is
+  only 80px wide and the 89px-wide backdrop doesn't have room for an 89px-wide bar at its
+  x-position either, so the destination width is unchanged) — the tick mark, authored at
+  texture column x=20, now actually lands at widget x=20 instead of visibly drifting.
+
+### Compatibility
+
+Touches only client-side rendering code (`DragonInventoryScreen`, `@OnlyIn(Dist.CLIENT)`)
+— no packet, NBT, or other data-format change. `community.2` and `community.3`
+clients/servers interoperate fully in any combination; there is no reason to require both
+sides to match this specific patch version.
+
+### Verification
+
+Screenshot-level visual confirmation (does the bar/text actually render, does the tick
+mark line up) is not gametest-reachable and is left to manual operator verification before
+this is distributed. The full existing automated gate (gametests + JUnit) was run to
+confirm no regressions elsewhere; see the commit message for the exact tallies.
+
 ## [1.9.2-community.2] — 2026-08-09
 
 Two operator bug reports against the `community.1` RC: summoning with insufficient room

@@ -151,9 +151,19 @@ public class DragonInventoryScreen extends AbstractContainerScreen<DragonContain
 
         @Override
         public void renderWidget(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            // Wave 7 (upstream bug, verified byte-identical to v1.9.2 / introduced
+            // upstream c6e67f8): this used to push a fake pose.translate(0, 0, 100) and
+            // rely on GUI depth-testing to keep the bar (and its text) drawn "in front
+            // of" the stats-panel backdrop, which was drawn LAST in render() — a
+            // fragile hack that silently breaks whenever depth testing happens to be
+            // off during widget render (a shader/optimization mod, or any
+            // ContainerScreenEvent.Render.Background handler that leaves it disabled),
+            // and never actually worked for the label/value TEXT below (GuiGraphics
+            // buffers text and flushes it without preserving that Z push, so text was
+            // covered even on a stock client). The backdrop now draws in renderBg(),
+            // UNDER these widgets by normal paint order — see DragonInventoryScreen's
+            // renderBg() — so no Z trickery is needed here at all.
             var pose = graphics.pose();
-            pose.pushPose();
-            pose.translate(0, 0, 100);
 
             int x = getX();
             int y = this.getY();
@@ -182,10 +192,18 @@ public class DragonInventoryScreen extends AbstractContainerScreen<DragonContain
             graphics.drawString(Minecraft.getInstance().font, Component.literal(valueString), posX, y, 0xffffff, false);
             pose.popPose();
 
-            graphics.blit(STATS_LOCATION, x, y + 6, 0, 0, 80, 5, 80, 30);
-            graphics.blit(STATS_LOCATION, x, y + 6, 0, barHeight, (int) (80d * value), 5, 80, 30);
-
-            pose.popPose();
+            // Wave 7: dragon_inventory_stats.png is actually 89x30, not 80x30 — the
+            // wrong textureWidth stretched the full 89px-wide texture to fit an 80px
+            // destination (squished bar, tick mark visibly off its authored column).
+            // Destination/sample width stays 80 (the widget is only 80px wide, and the
+            // 89px-wide backdrop at leftPos+6..95 doesn't have room for a 89px-wide bar
+            // starting at leftPos+10 anyway: 10+89=99 > 95) — only the texture-size
+            // args change, so the sample region is now genuinely 80-of-89 texture
+            // pixels at a 1:1 pixel mapping (tick column at texture x=20 lands at
+            // widget x=20, exactly where it was authored), leaving the rightmost 9px
+            // of the texture unused rather than the whole thing squeezed.
+            graphics.blit(STATS_LOCATION, x, y + 6, 0, 0, 80, 5, 89, 30);
+            graphics.blit(STATS_LOCATION, x, y + 6, 0, barHeight, (int) (80d * value), 5, 89, 30);
         }
     }
 
@@ -212,6 +230,9 @@ public class DragonInventoryScreen extends AbstractContainerScreen<DragonContain
         super.render(graphics, pMouseX, pMouseY, pPartialTick);
         this.renderTooltip(graphics, pMouseX, pMouseY);
 
+        // Intentionally still drawn here, LAST — this scrim is meant to sit on top of
+        // everything (widgets, labels, tooltip) when the dragon has no chest, unlike
+        // the stats-panel backdrop above (moved to renderBg(), Wave 7).
         if (!dragon.hasChest()) {
             graphics.fill(
                     leftPos + 101,
@@ -219,10 +240,6 @@ public class DragonInventoryScreen extends AbstractContainerScreen<DragonContain
                     leftPos + 101 + 162,
                     topPos + 52 + 54,
                     FastColor.ARGB32.color(200, 0x5B5B5B));
-        }
-
-        if (ServerConfig.ENABLE_RANDOM_STATS) {
-            graphics.blitSprite(TITLE_BOX_SPRITE, leftPos + 6, topPos + 49 + 10, 89, 70);
         }
     }
 
@@ -253,6 +270,18 @@ public class DragonInventoryScreen extends AbstractContainerScreen<DragonContain
         pGuiGraphics.fill(
                 leftPos + 3, topPos + 3, leftPos + 3 + 96, topPos + 3 + 200, FastColor.ARGB32.color(100, 0x5B5B5B));
         pGuiGraphics.blit(INVENTORY_LOCATION, leftPos, topPos, 0, 0, 269, 204, 512, 512);
+
+        // Wave 7 (upstream bug, verified byte-identical to v1.9.2 / introduced upstream
+        // c6e67f8): the stats-panel backdrop used to be drawn LAST, in render(), after
+        // the StatButton widgets (and their label/value text) had already been drawn —
+        // geometry fully overlaps all 4 bars, and only a fragile GUI-depth-test Z-trick
+        // in StatButton.renderWidget (now removed) kept the BARS visible; the TEXT was
+        // never protected by it and stayed hidden even on a stock client. renderBg()
+        // runs before any widget is drawn, so drawing it here puts the backdrop UNDER
+        // the widgets by normal paint order instead — no Z trickery needed.
+        if (ServerConfig.ENABLE_RANDOM_STATS) {
+            pGuiGraphics.blitSprite(TITLE_BOX_SPRITE, leftPos + 6, topPos + 49 + 10, 89, 70);
+        }
 
         InventoryScreen.renderEntityInInventoryFollowsMouse(
                 pGuiGraphics,
