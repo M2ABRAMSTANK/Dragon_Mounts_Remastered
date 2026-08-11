@@ -628,6 +628,11 @@ public class DragonWhistleHandler {
                     dragon.getXRot());
         }
 
+        // W8-SYNC-1: DragonStatePacket's handle() is now a no-op on every receiving
+        // client (the packet is server-authoritative; see DragonStatePacket's own
+        // javadoc) — this send is INERT for wave-8+ clients and is kept ONLY so
+        // .2/.3 clients still get their local sit/follow/wander echo (C6). Do not
+        // "clean this up" as dead code; it is load-bearing for old-client compat.
         PacketDistributor.sendToPlayersTrackingEntity(
                 dragon, new DragonStatePacket(dragon.getId(), ModConstants.DragonConstants.DRAGON_STATE_FOLLOW));
         return true;
@@ -931,6 +936,8 @@ public class DragonWhistleHandler {
         // is stale by construction").
         cap.setDragonInstance(summonItemIndex, new DragonInstance(newDragon));
 
+        // W8-SYNC-1: same INERT-on-wave-8+/kept-for-.2-.3-compat send as
+        // summonExistingDragon above — do not remove.
         PacketDistributor.sendToPlayersTrackingEntity(
                 newDragon, new DragonStatePacket(newDragon.getId(), ModConstants.DragonConstants.DRAGON_STATE_FOLLOW));
 

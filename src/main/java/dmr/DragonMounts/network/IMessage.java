@@ -29,6 +29,21 @@ public interface IMessage<T extends CustomPacketPayload> extends CustomPacketPay
      * <p>
      * If this method returns true, the message will be sent to all clients tracking the player
      * who sent the message.
+     * <p>
+     * <b>WARNING (wave 8, W8-SYNC-1/W8-SYNC-2):</b> the autoSync rebroadcast (PacketHelper's
+     * serverbound branch) fires AFTER {@code handle()}/{@code handleServer()} have already run,
+     * but it resends the packet's ORIGINAL, pre-handle field values — not anything read back
+     * from state {@code handle()}/{@code handleServer()} may have mutated (or refused to
+     * mutate). A handler that rejects the action (a failed ownership/ID check, a corrective
+     * write elsewhere in the same call) still gets its stale pre-handle payload echoed to
+     * trackers-and-self. DragonStatePacket and DismountDragonPacket both shipped with this bug
+     * (see their commit history) and both now hardcode {@code autoSync() -> false}, deferring to
+     * vanilla's own dirty-flag entity-data sync instead. After those two fixes the only
+     * remaining {@code autoSync() == true} packet is {@code CompleteDataSync}, which is {@link
+     * #clientboundOnly()} and therefore can never reach this branch — so the autoSync path is
+     * effectively dead code today. Think hard before wiring a new packet's autoSync back to
+     * true; if you do, make sure it rebroadcasts the ACTUAL post-handle state, not the
+     * pre-handle payload.
      *
      * @return True if this message should be automatically synchronized, false otherwise
      */
