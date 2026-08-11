@@ -1,7 +1,9 @@
 package dmr.tests;
 
 import dmr.DMRTestConstants;
+import dmr.DragonMounts.common.capability.DragonOwnerCapability;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler;
+import dmr.DragonMounts.config.ServerConfig;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler.DragonInstance;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModCapabilities;
@@ -10,19 +12,24 @@ import dmr.DragonMounts.registry.ModItems;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.items.DragonWhistleItem;
 import dmr.DragonMounts.util.PlayerStateUtils;
+import java.lang.reflect.Method;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.function.Consumer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.portal.DimensionTransition;
 import net.minecraft.world.phys.Vec3;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import net.neoforged.testframework.annotation.ForEachTest;
 import net.neoforged.testframework.annotation.TestHolder;
@@ -1024,6 +1031,245 @@ public class DragonWhistleTests {
 
         if (bound) {
             helper.fail("isBoundToWhistle incorrectly matched a null-UUID instance against a real dragon's UUID");
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Invokes the private {@code respawnDragonFromSnapshot(Player, DragonOwnerCapability,
+     * int)} directly via reflection — the concrete seam these W8-SYNC-4a tests need.
+     * Bypassing {@code callDragon}'s public entry point is deliberate: that path only
+     * ever reaches {@code respawnDragonFromSnapshot} with a valid (non-null
+     * dimension/lastPos) binding via the deferred-summon pool's 60-tick timeout (see
+     * {@code processDeferredSummons}), which is exactly the tick-window-timing shape
+     * this repo's KNOWN-FLAKY {@code deathRespawnMintIsNotFlagged} already exhibits
+     * (per C7, a new test should not knowingly inherit that same fragility when a
+     * deterministic seam exists).
+     */
+    private static boolean invokeRespawnDragonFromSnapshot(Player player, DragonOwnerCapability cap, int index) {
+        try {
+            Method method = DragonWhistleHandler.class.getDeclaredMethod(
+                    "respawnDragonFromSnapshot", Player.class, DragonOwnerCapability.class, int.class);
+            method.setAccessible(true);
+            return (boolean) method.invoke(null, player, cap, index);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to invoke respawnDragonFromSnapshot via reflection", e);
+        }
+    }
+
+    /**
+     * W8-SYNC-4a (C5 keystone) regression: {@code respawnDragonFromSnapshot} must
+     * restore the pre-mint whistle-binding triple (dragonNBTs/dragonInstances/
+     * lastSummons at this index) exactly when {@code addFreshEntity} refuses the mint,
+     * rather than leaving {@code lastSummons} pointed at the discarded, never-joined
+     * clone. Refusal is forced via a temporary {@code EntityJoinLevelEvent} listener
+     * that cancels the join of any dragon carrying this slot's dragonUUID —
+     * {@code createDragonEntity} stamps the clone with the SAME dragonUUID as the
+     * original, so this is exactly the join the fix must recover from.
+     *
+     * <p>
+     * Fails on pre-fix HEAD: {@code lastSummons[index]} is left pointing at the
+     * discarded clone's random real UUID instead of the original dragon's; passes
+     * after the fix (restored to the pre-mint values, byte-for-byte).
+     *
+     * <p>
+     * Not asserted (no capture seam exists anywhere in this test suite — see this
+     * wave's commits 10-12 red-baseline entries for the same, repeatedly-accepted
+     * limitation): that no {@code DragonStatePacket} was sent, and that the player
+     * received {@code dmr.dragon_call.not_found}. Both are real consequences of the
+     * `return false` this test does verify was taken (a `return true` further down
+     * would have sent the packet and skipped the not_found message), so the covered
+     * assertions are not vacuous with respect to those omissions.
+     *
+     * <p>
+     * Uses {@link #LARGE_TEMPLATE}, not the usual small {@code floor = true} platform:
+     * {@code respawnDragonFromSnapshot}'s own presence gate ({@code
+     * decideSnapshotRespawn}) requires EVERY chunk in a widened search box (up to 9x9
+     * chunks around the binding's {@code lastPos}, sized off {@code
+     * DRAGON_SEARCH_RADIUS}) to already be entity-loaded before it will even attempt a
+     * mint — on the small default footprint most of that box falls outside the
+     * generated/loaded structure, so the gate refuses EARLY (before ever touching
+     * {@code createDragonEntity}) for a reason having nothing to do with this fix, and
+     * this test's own restore assertions would then trivially (vacuously) pass because
+     * the triple was never touched in the first place. Placing the dragon near the
+     * center of a large, fully-loaded structure avoids that trap entirely.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void respawnRefusedMintRestoresPreMintBindingTriple(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        var centerPos = Vec3.atCenterOf(helper.absolutePos(new BlockPos(80, 2, 80)));
+        player.moveTo(centerPos.x, centerPos.y, centerPos.z);
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(80, 2, 80));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        var dragonUuid = dragon.getDragonUUID();
+
+        // Pre-mint triple, captured exactly as the fix must restore it.
+        var preNbt = cap.dragonNBTs.get(index);
+        var preInstance = cap.dragonInstances.get(index);
+        var preLastSummon = cap.lastSummons.get(index);
+
+        if (preNbt == null || preInstance == null || preLastSummon == null) {
+            helper.fail("Setup failed: bind did not populate all three whistle-state maps for index " + index);
+            return;
+        }
+
+        // Make the ORIGINAL unresolvable so respawnDragonFromSnapshot's own
+        // decideSnapshotRespawn presence gate allows a mint attempt at all — mirrors
+        // the real "chunk unloaded / dragon genuinely missing" trigger this path
+        // exists for.
+        dragon.discard();
+
+        Consumer<EntityJoinLevelEvent> cancelMint = event -> {
+            if (event.getEntity() instanceof TameableDragonEntity candidate
+                    && dragonUuid.equals(candidate.getDragonUUID())) {
+                event.setCanceled(true);
+            }
+        };
+
+        NeoForge.EVENT_BUS.addListener(EntityJoinLevelEvent.class, cancelMint);
+        boolean result;
+        try {
+            result = invokeRespawnDragonFromSnapshot(player, cap, index);
+        } finally {
+            NeoForge.EVENT_BUS.unregister(cancelMint);
+        }
+
+        if (result) {
+            helper.fail("respawnDragonFromSnapshot returned true despite the mint's join being cancelled");
+            return;
+        }
+
+        if (!preNbt.equals(cap.dragonNBTs.get(index))) {
+            helper.fail("dragonNBTs[" + index + "] was not restored to its pre-mint value after a refused mint");
+            return;
+        }
+
+        var restoredInstance = cap.dragonInstances.get(index);
+        if (restoredInstance == null || !preInstance.writeNBT().equals(restoredInstance.writeNBT())) {
+            helper.fail("dragonInstances[" + index + "] was not restored to its pre-mint value after a refused"
+                    + " mint (still points at the discarded clone)");
+            return;
+        }
+
+        if (!preLastSummon.equals(cap.lastSummons.get(index))) {
+            helper.fail("lastSummons[" + index + "] was not restored to the ORIGINAL dragon's real UUID after a"
+                    + " refused mint — still " + cap.lastSummons.get(index) + ", the discarded clone's UUID."
+                    + " This is the C5 hazard: a later chunk load of the REAL dragon would be dedup-cancelled"
+                    + " under duplicate_resolution=AGGRESSIVE.");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SYNC-4a companion regression: proves the restore in
+     * {@link #respawnRefusedMintRestoresPreMintBindingTriple} is not just internally
+     * consistent but actually fixes the C5 failure mode it exists to prevent — after a
+     * refused mint, the ORIGINAL dragon (same real entity UUID, same dragonUUID) must
+     * still be accepted when it later rejoins (e.g. its chunk reloads), rather than
+     * being dedup-cancelled because {@code lastSummons} was left pointing at the
+     * discarded clone.
+     *
+     * <p>
+     * Explicitly forces {@code ServerConfig.DUPLICATE_RESOLUTION = AGGRESSIVE} for the
+     * duration of the test (default is {@code LOG}, which never cancels a join at all
+     * — under the default, this test would pass identically whether or not the
+     * restore happened, i.e. be vacuous). AGGRESSIVE is the resolution
+     * {@code respawnDragonFromSnapshot}'s own javadoc names as the one this fix
+     * protects against.
+     *
+     * <p>
+     * Uses {@link #LARGE_TEMPLATE} for the same reason
+     * {@link #respawnRefusedMintRestoresPreMintBindingTriple} does — see that test's
+     * javadoc.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void refusedMintRestoreStillAllowsOriginalDragonToRejoin(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        var centerPos = Vec3.atCenterOf(helper.absolutePos(new BlockPos(80, 2, 80)));
+        player.moveTo(centerPos.x, centerPos.y, centerPos.z);
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(80, 2, 80));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        var originalEntityId = dragon.getUUID();
+        var dragonUuid = dragon.getDragonUUID();
+
+        dragon.discard();
+
+        Consumer<EntityJoinLevelEvent> cancelMint = event -> {
+            if (event.getEntity() instanceof TameableDragonEntity candidate
+                    && dragonUuid.equals(candidate.getDragonUUID())) {
+                event.setCanceled(true);
+            }
+        };
+
+        NeoForge.EVENT_BUS.addListener(EntityJoinLevelEvent.class, cancelMint);
+        try {
+            invokeRespawnDragonFromSnapshot(player, cap, index);
+        } finally {
+            NeoForge.EVENT_BUS.unregister(cancelMint);
+        }
+
+        // Simulate the ORIGINAL dragon rejoining (its chunk reloads, or a cross-
+        // dimension transit lands it back): same real entity UUID, same dragonUUID.
+        // Built and UUID-stamped BEFORE ever touching the level, so there is no
+        // level-side UUID index to desync (unlike setUUID after an add).
+        var rejoined = ModEntities.DRAGON_ENTITY.get().create(helper.getLevel());
+        if (rejoined == null) {
+            helper.fail("Failed to construct the rejoining dragon entity");
+            return;
+        }
+        rejoined.setBreed(DragonBreedsRegistry.getDefault());
+        rejoined.setDragonUUID(dragonUuid);
+        rejoined.setUUID(originalEntityId);
+        rejoined.setOwnerUUID(player.getUUID());
+        var rejoinPos = Vec3.atCenterOf(helper.absolutePos(new BlockPos(80, 2, 80)));
+        rejoined.setPos(rejoinPos.x, rejoinPos.y, rejoinPos.z);
+
+        var previousResolution = ServerConfig.DUPLICATE_RESOLUTION;
+        ServerConfig.DUPLICATE_RESOLUTION = ServerConfig.DuplicateResolution.AGGRESSIVE;
+        boolean added;
+        try {
+            added = helper.getLevel().addFreshEntity(rejoined);
+        } finally {
+            ServerConfig.DUPLICATE_RESOLUTION = previousResolution;
+        }
+
+        if (!added) {
+            helper.fail("The ORIGINAL dragon (real UUID " + originalEntityId + ") was refused on rejoin after a"
+                    + " refused respawn mint — the binding was NOT correctly restored, so"
+                    + " DragonWhistleEvent's dedup check treated the real dragon as the duplicate (C5"
+                    + " violation: permanent dragon loss under duplicate_resolution=AGGRESSIVE)");
+            return;
         }
 
         helper.succeed();

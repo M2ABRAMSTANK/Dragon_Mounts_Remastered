@@ -761,6 +761,20 @@ public class DragonWhistleHandler {
      * sites risked exactly the kind of drift that under-detected real deaths in the
      * first place.
      */
+    /**
+     * W8-SYNC-4a: puts {@code preMintValue} back into {@code map} at {@code index} if
+     * it was present, or removes the key entirely if it was absent — i.e. restores the
+     * map to exactly its pre-mint state, never leaving a stray {@code null}/sentinel
+     * entry behind.
+     */
+    private static <V> void restoreOrRemove(ConcurrentHashMap<Integer, V> map, int index, Optional<V> preMintValue) {
+        if (preMintValue.isPresent()) {
+            map.put(index, preMintValue.get());
+        } else {
+            map.remove(index);
+        }
+    }
+
     private static boolean respawnDragonFromSnapshot(Player player, DragonOwnerCapability cap, int summonItemIndex) {
         // The binding can be cleaned up between a deferred summon's scheduling and its
         // re-check (canCall's invalid-data sweep, dragon death without respawn, ...);
@@ -902,6 +916,22 @@ public class DragonWhistleHandler {
             return false;
         }
 
+        // W8-SYNC-4a (C5 keystone): capture the pre-mint whistle-binding triple, each as
+        // present-or-absent, BEFORE createDragonEntity below overwrites it.
+        // createDragonEntity -> setDragonToWhistle ALREADY writes dragonNBTs[index],
+        // dragonInstances[index] and lastSummons[index] (and pushes a DragonNBTSync) —
+        // the rejected original W8-Sync-4 respawn spec's premise, "on refusal the
+        // pre-existing binding is left untouched", is false. If addFreshEntity below is
+        // refused, restoring is not optional polish: leaving lastSummons[index] pointed
+        // at the discarded, never-joined clone makes DragonWhistleEvent#onEntityJoinWorld
+        // compare it against the REAL dragon's UUID on every future chunk load, and
+        // under duplicate_resolution=AGGRESSIVE that comparison mismatches and the
+        // real dragon's join is cancelled — permanent dragon loss, exactly what C5
+        // forbids.
+        var preMintNbt = Optional.ofNullable(cap.dragonNBTs.get(summonItemIndex));
+        var preMintInstance = Optional.ofNullable(cap.dragonInstances.get(summonItemIndex));
+        var preMintLastSummon = Optional.ofNullable(cap.lastSummons.get(summonItemIndex));
+
         TameableDragonEntity newDragon = cap.createDragonEntity(player, player.level, summonItemIndex);
 
         if (newDragon == null) {
@@ -946,7 +976,39 @@ public class DragonWhistleHandler {
         }
 
         newDragon.setPos(player.getX(), player.getY(), player.getZ());
-        player.level.addFreshEntity(newDragon);
+        boolean added = player.level.addFreshEntity(newDragon);
+
+        if (!added) {
+            // Refused — a third-party EntityJoinLevelEvent cancel, or ServerLevel
+            // #addEntity's own isRemoved() refusal (an AGGRESSIVE self-cancel here is
+            // unreachable: setDragonToWhistle already pointed lastSummons at THIS clone,
+            // so the join-time dedup comparison cannot mismatch against itself). Restore
+            // the pre-mint triple exactly — removing a key that was absent, rather than
+            // writing a sentinel — and re-push the owner's client copy the same way
+            // canCall's own corrupted-binding repair does, so the client's cached
+            // snapshot cannot drift from what the server just restored.
+            restoreOrRemove(cap.dragonNBTs, summonItemIndex, preMintNbt);
+            restoreOrRemove(cap.dragonInstances, summonItemIndex, preMintInstance);
+            restoreOrRemove(cap.lastSummons, summonItemIndex, preMintLastSummon);
+
+            DMR.LOGGER.warn(
+                    "Refusing snapshot-respawn mint of dragon {} for player {}: addFreshEntity refused the join"
+                            + " (a third-party EntityJoinLevelEvent cancel, or the level already contains an entity"
+                            + " with a colliding real UUID) — restored the pre-mint whistle binding instead of"
+                            + " leaving lastSummons pointed at the discarded, never-joined entity (C5)",
+                    instance.getUUID(),
+                    player.getName().getString());
+
+            if (!player.level.isClientSide && player instanceof ServerPlayer serverPlayer) {
+                PacketDistributor.sendToPlayer(serverPlayer, new CompleteDataSync(player));
+            }
+
+            if (!player.level.isClientSide) {
+                player.displayClientMessage(
+                        Component.translatable("dmr.dragon_call.not_found").withStyle(ChatFormatting.RED), true);
+            }
+            return false;
+        }
 
         // Wave 2 fix: createDragonEntity's setDragonToWhistle call wrote the DragonInstance
         // (including lastPos) from the snapshot's pre-move position, BEFORE the setPos
