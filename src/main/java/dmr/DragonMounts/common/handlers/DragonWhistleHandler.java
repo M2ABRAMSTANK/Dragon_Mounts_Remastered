@@ -12,7 +12,6 @@ import dmr.DragonMounts.registry.ModCapabilities;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModItems;
 import dmr.DragonMounts.registry.ModSounds;
-import dmr.DragonMounts.server.entity.DragonConstants;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.items.DragonWhistleItem;
 import dmr.DragonMounts.server.worlddata.DragonWorldDataManager;
@@ -44,6 +43,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.targeting.TargetingConditions;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ChunkPos;
@@ -552,6 +552,31 @@ public class DragonWhistleHandler {
      * {@code changeDimension} teleport (the #123/#125 fix — the entity moves, it is
      * never cloned), same-dimension via walk-or-teleport as before.
      */
+    /**
+     * W8-SUMMON-1a: same-dimension walk-vs-teleport decision, extracted as a pure
+     * function so the inclusive boundary (a dragon exactly at the threshold still
+     * walks — unchanged semantics from the pre-fix constant-based check) is unit
+     * testable without bootstrapping a {@code Mob}/{@code Player}.
+     *
+     * <p>
+     * The old {@code DragonConstants.BASE_FOLLOW_RANGE * FOLLOW_RANGE_MULTIPLIER}
+     * (32 * 2 = 64) constant pair is gone from this decision path entirely — NOT
+     * because the 33-64 band was a dead zone (refute-summon.json's CORRECTED
+     * verdict on summon-01 found the opposite: it is a working two-hop
+     * walk/pathfind approach), but because that band silently exceeded the
+     * pathfinder's own single-computation search radius, making the walk
+     * unreliable. A future agent must not "restore" 64 believing the dead-zone
+     * story; the config escape hatch below exists for operators who want the old
+     * radius back. See {@link ModConstants.DragonConstants#walkSummonMaxDistance}
+     * for the shared range contract this defers to.
+     */
+    public static boolean isWithinWalkRange(
+            double distanceToPlayer, double configuredWalkMaxDistance, double followRangeAttributeValue) {
+        return distanceToPlayer
+                <= ModConstants.DragonConstants.walkSummonMaxDistance(
+                        configuredWalkMaxDistance, followRangeAttributeValue);
+    }
+
     private static boolean summonExistingDragon(
             Player player, DragonOwnerCapability cap, int summonItemIndex, TameableDragonEntity dragon) {
         dragon.setHealth(Math.max(ModConstants.DragonConstants.MIN_DRAGON_HEALTH, dragon.getHealth()));
@@ -608,8 +633,10 @@ public class DragonWhistleHandler {
                     "Teleported dragon: {} across dimensions to player: {}",
                     dragon.getDragonUUID(),
                     player.getName().getString());
-        } else if (dragon.position().distanceTo(player.position())
-                <= DragonConstants.BASE_FOLLOW_RANGE * ModConstants.DragonConstants.FOLLOW_RANGE_MULTIPLIER) {
+        } else if (isWithinWalkRange(
+                dragon.position().distanceTo(player.position()),
+                ServerConfig.SUMMON_WALK_MAX_DISTANCE,
+                dragon.getAttributeValue(Attributes.FOLLOW_RANGE))) {
             // Walk to player
             cap.lastSummons.put(summonItemIndex, dragon.getUUID());
 

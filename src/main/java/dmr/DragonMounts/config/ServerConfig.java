@@ -213,6 +213,20 @@ public class ServerConfig {
     public static int MAX_FOLLOW_DISTANCE = 8;
 
     @Config(
+            key = "summon_walk_max_distance",
+            comment = {
+                "W8-SUMMON-1a: distance (in blocks) within which a whistled dragon WALKS to its owner",
+                "instead of teleporting, in the same dimension. 0.0 (default) means 'use the dragon's",
+                "live generic.follow_range attribute' (respects datapack breed overrides via",
+                "IDragonBreed#applyAttributes). Set to 64 to restore pre-1.9.2-community.4 behavior.",
+                "Never exceeds the pathfinder's own single-computation search radius, regardless of",
+                "this value — see ModConstants.DragonConstants.walkSummonMaxDistance."
+            },
+            category = "whistle")
+    @RangeConstraint(min = 0.0, max = 256.0)
+    public static double SUMMON_WALK_MAX_DISTANCE = 0.0;
+
+    @Config(
             key = "reclaim_snapshot_clones",
             comment = {
                 "Self-heal a proven snapshot-respawn clone: when the whistle dedup check finds two live dragons",

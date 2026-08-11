@@ -196,4 +196,36 @@ public class DragonWhistleHandlerLogicTests {
 
         assertFalse(tag.contains("uuid"), "writeNBT must omit the \"uuid\" key rather than write a null sentinel");
     }
+
+    /**
+     * W8-SUMMON-1a: a dragon exactly AT the threshold must still walk — inclusive
+     * {@code <=} semantics unchanged from the pre-fix {@code BASE_FOLLOW_RANGE *
+     * FOLLOW_RANGE_MULTIPLIER} constant check. Default config (0.0 = live attribute):
+     * a dragon 32 blocks from its owner (the default generic.follow_range) walks.
+     */
+    @Test
+    void isWithinWalkRangeIsInclusiveAtTheBoundaryWithDefaultConfig() {
+        assertTrue(
+                DragonWhistleHandler.isWithinWalkRange(32.0, 0.0, 32.0),
+                "distance exactly equal to the live follow_range attribute must still walk");
+        assertFalse(
+                DragonWhistleHandler.isWithinWalkRange(32.000001, 0.0, 32.0),
+                "distance a hair beyond the live follow_range attribute must teleport, not walk");
+    }
+
+    /**
+     * W8-SUMMON-1a config escape hatch: an operator-set {@code
+     * SUMMON_WALK_MAX_DISTANCE=64} restores the pre-wave-8 64-block walk radius (the
+     * old {@code BASE_FOLLOW_RANGE(32) * FOLLOW_RANGE_MULTIPLIER(2.0)} product), still
+     * inclusive at the boundary, regardless of the live follow_range attribute value.
+     */
+    @Test
+    void isWithinWalkRangeHonorsConfiguredOverrideAtTheBoundary() {
+        assertTrue(
+                DragonWhistleHandler.isWithinWalkRange(64.0, 64.0, 32.0),
+                "an explicit 64-block override must restore the old inclusive boundary");
+        assertFalse(
+                DragonWhistleHandler.isWithinWalkRange(64.000001, 64.0, 32.0),
+                "distance a hair beyond the configured override must teleport, not walk");
+    }
 }
