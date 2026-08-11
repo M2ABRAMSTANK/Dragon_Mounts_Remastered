@@ -11,6 +11,7 @@ import java.util.List;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.gametest.framework.GameTest;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -1119,6 +1120,77 @@ public class PathNavigationTests {
             helper.fail("DragonMoveController.tick() threw IndexOutOfBoundsException against a completed"
                     + " (isDone()==true) path — the next-node water lookahead called getNextNode() without"
                     + " first checking path.isDone(): " + e);
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    // ---------------------------------------------------------------------------------
+    // W8-PF10 (commit 8)
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * W8-PF10 (amended: per-request followRange scaling, clamped between the live
+     * {@code Attributes.FOLLOW_RANGE} attribute and {@code
+     * ModConstants.DragonConstants.pathfindSearchRadius}, rather than a flat pinned
+     * ceiling). This dragon's {@code FOLLOW_RANGE} attribute is left at its default
+     * ({@code DragonConstants.BASE_FOLLOW_RANGE = 32}) — pre-fix, {@code
+     * PathNavigation.createPath(Set,int,boolean,int)} derives {@code followRange} purely
+     * from that attribute (verified against decompiled source), and {@code
+     * PathFinder.findPath}'s {@code maxRange} gate (node expansion stops at {@code
+     * node.distanceTo(start) >= maxRange}; insertion requires {@code
+     * node1.walkedDistance < maxRange}) therefore caps a single computation well short
+     * of a 45-block target, so even a completely open, obstacle-free flight path fails
+     * to reach in one {@code createPath} call.
+     *
+     * <p>
+     * Kept deterministic per C7 (the gate's concern that a widened search radius could
+     * exhaust the node-visit budget and silently degrade to a terrain-dependent
+     * best-effort path): the corridor is a straight, fully open flight lane with zero
+     * obstacles, so the number of nodes PathFinder actually needs to visit is small
+     * relative to the {@code 2560}-node budget {@link PathfindingRulesTests
+     * #visitedNodeBudgetCoversWidenedSearchRadiusWithComfortableMargin} pins as
+     * comfortably sufficient — this test proves the RADIUS widens far enough to reach;
+     * that sibling unit test proves the BUDGET doesn't independently cap the search
+     * first.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, {@code createPath} either returns {@code null} or a
+     * non-reaching best-effort {@code Path} (canReach()==false) for this request, even
+     * though the target is genuinely, trivially reachable by open-air flight.
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void pathfinderReaches45BlockTargetDespiteFollowRangeAttributeOf32(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(50, 0, 4), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 2));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        double attributeValue = dragon.getAttributeValue(Attributes.FOLLOW_RANGE);
+        if (attributeValue >= 45.0) {
+            helper.fail("DIAGNOSTIC precondition failed: dragon's FOLLOW_RANGE attribute (" + attributeValue
+                    + ") is already >= this test's 45-block separation, so it cannot distinguish the fix from"
+                    + " vanilla's own unmodified single-computation reach");
+            return;
+        }
+
+        BlockPos target = helper.absolutePos(new BlockPos(47, 2, 2));
+        Path path = dragon.getNavigation().createPath(target, 1);
+
+        if (path == null) {
+            helper.fail("createPath returned null for a 45-block open-air target with FOLLOW_RANGE attribute "
+                    + attributeValue + " — the pathfinder's per-request search radius did not widen to cover"
+                    + " this request");
+            return;
+        }
+        if (!path.canReach()) {
+            helper.fail("createPath returned a non-reaching (best-effort) path for a 45-block, fully open-air"
+                    + " target — the widened followRange did not let the search actually reach the target"
+                    + " within its node-visit budget");
             return;
         }
 

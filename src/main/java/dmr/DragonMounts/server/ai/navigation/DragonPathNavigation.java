@@ -1,8 +1,11 @@
 package dmr.DragonMounts.server.ai.navigation;
 
+import dmr.DragonMounts.ModConstants;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
+import java.util.Set;
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.navigation.FlyingPathNavigation;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.pathfinder.Path;
@@ -17,6 +20,19 @@ public class DragonPathNavigation extends FlyingPathNavigation {
 
     private int lastPathCreationDelta = 0;
     private static final int TICKS_BETWEEN_PATH_CREATIONS = 5;
+
+    // W8-PF10: a fixed buffer added on top of the straight-line distance to this
+    // request's nearest target before clamping into [liveFollowRangeAttribute,
+    // pathfindSearchRadius]. PathFinder's maxRange gate (verified against decompiled
+    // source: node expansion stops at `node.distanceTo(start) >= maxRange`, insertion
+    // requires `node1.walkedDistance < maxRange`) measures WALKED distance, which for
+    // any route with turns exceeds the straight-line distance to the target — without
+    // this margin a target exactly at the clamped followRange's straight-line distance
+    // could still fail to reach if the actual route isn't perfectly direct. Mirrors
+    // vanilla's own default regionOffset (8, see PathNavigation.createPath(Set,int)'s
+    // `this.createPath(positions, 8, false, distance)`) rather than inventing an
+    // unrelated constant.
+    private static final double FOLLOW_RANGE_REQUEST_MARGIN = 8.0;
 
     public DragonPathNavigation(TameableDragonEntity dragon, Level level) {
         super(dragon, level);
@@ -63,6 +79,51 @@ public class DragonPathNavigation extends FlyingPathNavigation {
         super.tick();
 
         lastPathCreationDelta++;
+    }
+
+    // W8-PF10: overrides PathNavigation's protected 4-arg createPath (verified against
+    // decompiled source: it normally derives followRange purely from the LIVE
+    // Attributes.FOLLOW_RANGE value and delegates to the 5-arg overload) so followRange
+    // is scaled to what THIS specific request actually needs, clamped between the live
+    // FOLLOW_RANGE attribute (today's floor — a short request never shrinks below what
+    // it already gets) and ModConstants.DragonConstants.pathfindSearchRadius (today's
+    // ceiling — the ONE contract this navigator and DragonWhistleHandler's summon
+    // walk/teleport decision both consume, per integration-plan.json conflict (a)).
+    //
+    // Deliberately scales PER REQUEST rather than pinning followRange to the ceiling
+    // unconditionally: followRange also sizes the PathNavigationRegion snapshot at
+    // ±(followRange + regionOffset) (verified: PathNavigation.createPath(Set,int,
+    // boolean,int,float)'s `i = (int)(followRange + regionOffset)`), so pinning 64
+    // globally would move EVERY pathfind — including a 5-block one — from vanilla's
+    // ~±40 (~6x6 chunk) snapshot to ~±72 (~10x10 chunk), for every dragon, on every
+    // pathfind, on a live server. A request whose nearest target is already within the
+    // live attribute's range is unaffected (clamp floors at attributeValue); only a
+    // genuinely distant target pays for the wider snapshot.
+    //
+    // Does NOT affect maxVisitedNodes: that budget is fixed once at construction
+    // (PathNavigation's constructor: `Mth.floor(mob.getAttributeValue(FOLLOW_RANGE) *
+    // 16.0)`, scaled per findPath call by this class's own setMaxVisitedNodesMultiplier
+    // (5f)) and is untouched by this override — see
+    // PathNavigationTests#pathfinderReaches45BlockTargetDespiteFollowRangeAttributeOf32
+    // for the deterministic, real-PathFinder-run proof that the budget still reaches a
+    // widened-radius target at today's constants (a prior unit test attempted to pin
+    // this via reconstructed budget/radius arithmetic instead; it compared a node COUNT
+    // against a distance scaled by an invented factor and was deleted as dimensionally
+    // meaningless — see PathfindingRulesTests's javadoc at the same anchor for why).
+    @Override
+    protected @Nullable Path createPath(Set<BlockPos> targets, int regionOffset, boolean offsetUpward, int accuracy) {
+        double attributeValue = mob.getAttributeValue(Attributes.FOLLOW_RANGE);
+        double searchRadius = ModConstants.DragonConstants.pathfindSearchRadius(attributeValue);
+
+        double distanceToNearestTarget = targets.stream()
+                .mapToDouble(target -> mob.position().distanceTo(Vec3.atCenterOf(target)))
+                .min()
+                .orElse(0.0);
+
+        float followRange =
+                (float) Mth.clamp(distanceToNearestTarget + FOLLOW_RANGE_REQUEST_MARGIN, attributeValue, searchRadius);
+
+        return this.createPath(targets, regionOffset, offsetUpward, accuracy, followRange);
     }
 
     @Override
