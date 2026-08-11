@@ -117,8 +117,13 @@ public class DragonOwnerCapability implements INBTSerializable<CompoundTag> {
 
     public boolean isBoundToWhistle(TameableDragonEntity dragon) {
         if (dragon.getDragonUUID() != null) {
+            // W8-SUMMON-2 (null-UUID hardening, gate-compat constraint-d1's other half):
+            // a DragonInstance can itself carry a null UUID (a legacy entry that predates
+            // the "uuid" NBT key, or one round-tripped through the writeNBT guard above)
+            // — guard the per-instance UUID too, not just the dragon's.
             return dragonInstances.values().stream()
-                    .anyMatch(instance -> instance.getUUID().equals(dragon.getDragonUUID()));
+                    .anyMatch(instance ->
+                            instance.getUUID() != null && instance.getUUID().equals(dragon.getDragonUUID()));
         }
 
         return false;

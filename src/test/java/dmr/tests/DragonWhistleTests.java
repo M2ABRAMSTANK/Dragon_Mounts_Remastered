@@ -12,6 +12,7 @@ import dmr.DragonMounts.server.items.DragonWhistleItem;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.util.Objects;
 import java.util.UUID;
+import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.sounds.SoundSource;
@@ -879,6 +880,150 @@ public class DragonWhistleTests {
 
         if (index2.isEmpty() || index2.getAsInt() != 1) {
             helper.fail("Dragon2 was bound to wrong whistle index: " + index2);
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Reserved for the same-dimension teleport-branch reach test below: default
+     * {@code @EmptyTemplate} footprints (3x3x3, or this file's usual {@code floor =
+     * true} platform) are far too small for an 80-block separation, and a raw {@code
+     * setPos} into terrain OUTSIDE any loaded/ticketed structure would make {@code
+     * findDragon}'s exact-entity-id lookup depend on incidental chunk-load timing
+     * (entity-section visibility) instead of the summon logic under test — the exact
+     * footprint-vs-chunk-visibility trap {@code PathNavigationTests}' own {@code
+     * LARGE_TEMPLATE} javadoc documents and resolves the same way. Both the player and
+     * the displaced dragon stay inside this single, fully-generated/loaded structure
+     * for the whole test.
+     */
+    static final String LARGE_TEMPLATE = "160x24x160";
+
+    /**
+     * W8-SUMMON-2 regression: {@code summonExistingDragon}'s same-dimension teleport
+     * branch now refreshes the whistle-binding {@link DragonInstance} (dimension,
+     * entityId, dragonUUID, lastPos) from the dragon's FINAL post-teleport position,
+     * rather than leaving it pointing at wherever it was captured at BIND time until
+     * {@code TameableDragonEntity}'s own periodic 100-tick baseTick refresh catches
+     * up.
+     *
+     * <p>
+     * The player deliberately moves AFTER the dragon is bound and BEFORE it is
+     * summoned: the teleport branch always lands the dragon exactly on the player's
+     * CURRENT position, so if bind time and summon time shared the same player
+     * position, a stale (unrefreshed) binding would coincidentally still equal
+     * {@code dragon.blockPosition()} post-summon and this test would pass on both
+     * pre- and post-fix code — the mid-flight player move is what makes bind-time
+     * lastPos and post-teleport lastPos provably different values, so only the FIXED
+     * code (which re-captures lastPos from the dragon's final, post-teleport position)
+     * can pass. Fails on pre-fix HEAD (the binding keeps the stale bind-time position,
+     * which is the OLD player position); passes after the fix.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void sameDimensionTeleportRefreshesDragonInstanceBinding(ExtendedGameTestHelper helper) {
+        var bindPos = Vec3.atCenterOf(helper.absolutePos(new BlockPos(20, 2, 20)));
+
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveTo(bindPos.x, bindPos.y, bindPos.z);
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(20, 2, 20));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+        var handler = PlayerStateUtils.getHandler(player);
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            int whistleId = ((DragonWhistleItem) whistle.get()).getColor().getId();
+            if (whistleId == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        // The player relocates after the bind — the binding's bind-time lastPos (still
+        // bindPos) is now stale by construction, independent of anything the summon
+        // does. Both this and the dragon's subsequent displacement below stay inside
+        // the SAME already-loaded LARGE_TEMPLATE structure.
+        var summonPos = Vec3.atCenterOf(helper.absolutePos(new BlockPos(20, 2, 60)));
+        player.moveTo(summonPos.x, summonPos.y, summonPos.z);
+
+        // 80 blocks from the player's NEW (summon-time) position (>64 =
+        // BASE_FOLLOW_RANGE * FOLLOW_RANGE_MULTIPLIER = 32 * 2) — forces the TELEPORT
+        // branch, which lands the dragon exactly on summonPos.
+        var farPos = Vec3.atCenterOf(helper.absolutePos(new BlockPos(100, 2, 60)));
+        dragon.setPos(farPos.x, farPos.y, farPos.z);
+
+        boolean result = DragonWhistleHandler.callDragon(player);
+        if (!result) {
+            helper.fail("Failed to call dragon");
+            return;
+        }
+
+        var updatedInstance = handler.getDragonInstance(index);
+        if (updatedInstance == null) {
+            helper.fail("Dragon instance binding was lost after summon");
+            return;
+        }
+
+        if (updatedInstance.getLastPos() == null || updatedInstance.getLastPos().equals(BlockPos.containing(bindPos))) {
+            helper.fail("Dragon instance binding's lastPos is still the stale BIND-time position " + bindPos
+                    + " instead of being refreshed to the post-teleport position");
+            return;
+        }
+
+        if (!updatedInstance.getLastPos().equals(dragon.blockPosition())) {
+            helper.fail("Dragon instance binding's lastPos was not refreshed to the post-teleport position: expected "
+                    + dragon.blockPosition() + " but got " + updatedInstance.getLastPos());
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SUMMON-2 (null-UUID hardening) regression: {@code
+     * DragonOwnerCapability#isBoundToWhistle} must not NPE when one of the player's
+     * {@link DragonInstance} entries has a null dragonUUID (a legacy entry that
+     * predates the "uuid" NBT key). Fails on pre-fix HEAD with an NPE from
+     * {@code instance.getUUID().equals(...)}; passes (returns false, since the
+     * null-UUID entry cannot possibly match) after the fix.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void isBoundToWhistleToleratesNullUuidInstance(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var handler = PlayerStateUtils.getHandler(player);
+        // A legacy-shaped entry: real entityId, but no recorded dragonUUID.
+        handler.dragonInstances.put(0, new DragonInstance("minecraft:overworld", UUID.randomUUID(), null));
+
+        boolean bound;
+        try {
+            bound = handler.isBoundToWhistle(dragon);
+        } catch (NullPointerException e) {
+            helper.fail("isBoundToWhistle NPE'd on a DragonInstance with a null dragonUUID: " + e);
+            return;
+        }
+
+        if (bound) {
+            helper.fail("isBoundToWhistle incorrectly matched a null-UUID instance against a real dragon's UUID");
         }
 
         helper.succeed();

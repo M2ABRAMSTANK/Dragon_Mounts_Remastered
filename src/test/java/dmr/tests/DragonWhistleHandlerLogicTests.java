@@ -1,6 +1,8 @@
 package dmr.tests;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -11,6 +13,7 @@ import dmr.DragonMounts.common.handlers.DragonWhistleHandler.SnapshotRespawnDeci
 import java.util.List;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.ChunkPos;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -174,5 +177,23 @@ public class DragonWhistleHandlerLogicTests {
                 }
             }
         }
+    }
+
+    /**
+     * W8-SUMMON-2 (null-UUID hardening): a {@link DragonInstance} whose {@code
+     * dragonUUID} is null (the blank-legacy-string edge case gate-compat
+     * constraint-d1 flagged) must not NPE when written to NBT — this write is
+     * unconditional and reachable from {@code DragonOwnerCapability#serializeNBT},
+     * i.e. from PLAYER SAVE. Pre-fix, {@code CompoundTag#putUUID("uuid", null)}
+     * throws (it forwards to {@code UUIDUtil.uuidToIntArray}, which dereferences the
+     * UUID); post-fix the "uuid" key is simply omitted.
+     */
+    @Test
+    void writeNbtOmitsUuidKeyWhenDragonUuidIsNull() {
+        var instance = new DragonInstance("minecraft:overworld", UUID.randomUUID(), null);
+
+        CompoundTag tag = assertDoesNotThrow(instance::writeNBT, "writeNBT must not NPE on a null dragonUUID");
+
+        assertFalse(tag.contains("uuid"), "writeNBT must omit the \"uuid\" key rather than write a null sentinel");
     }
 }

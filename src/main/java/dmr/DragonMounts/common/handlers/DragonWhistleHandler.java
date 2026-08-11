@@ -98,7 +98,15 @@ public class DragonWhistleHandler {
             CompoundTag tag = new CompoundTag();
             tag.putString("dimension", dimension);
             tag.putUUID("entityId", entityId);
-            tag.putUUID("uuid", UUID);
+            // W8-SUMMON-2 (null-UUID hardening): a dragon whose getDragonUUID() is null
+            // (a blank-legacy-string edge case per gate-compat constraint-d1) must not
+            // NPE here — this write is unconditional and reachable from
+            // DragonOwnerCapability#serializeNBT, i.e. from PLAYER SAVE. Skipping the key
+            // entirely (rather than writing a sentinel) is symmetric with readNBT below,
+            // which already tolerates its absence.
+            if (UUID != null) {
+                tag.putUUID("uuid", UUID);
+            }
             if (lastPos != null) {
                 tag.putLong("lastPos", lastPos.asLong());
             }
@@ -627,6 +635,17 @@ public class DragonWhistleHandler {
                     dragon.getYRot(),
                     dragon.getXRot());
         }
+
+        // W8-SUMMON-2: refresh the whistle-binding DragonInstance from the FINAL
+        // `dragon` reference/position, uniformly for all three branches above. The
+        // cross-dimension branch's binding is already refreshed once inside
+        // TameableDragonEntity#changeDimension (dimension + lastPos as of arrival in
+        // the new level) — this second write is not redundant: it captures the
+        // position AFTER the subsequent teleportTo repositions the dragon next to the
+        // player, so lastPos is never stale by even the span of a single summon. Never
+        // reached on the vetoed cross-dimension early-return above (that branch
+        // `return false`s before falling through to here).
+        cap.setDragonInstance(summonItemIndex, new DragonInstance(dragon));
 
         // W8-SYNC-1: DragonStatePacket's handle() is now a no-op on every receiving
         // client (the packet is server-authoritative; see DragonStatePacket's own
