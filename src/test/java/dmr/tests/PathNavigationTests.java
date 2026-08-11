@@ -1045,4 +1045,83 @@ public class PathNavigationTests {
 
         helper.succeed();
     }
+
+    // ---------------------------------------------------------------------------------
+    // W8-PF7a (commit 7)
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * W8-PF7a (split out of the REJECTED W8-PF7 per the gate's explicit instruction —
+     * "this part is correct as written"). {@code DragonMoveController.tick()}'s next-node
+     * water lookahead called {@code mob.getNavigation().getPath().getNextNode()}
+     * whenever a path existed, with no {@code isDone()} check. {@code
+     * Path#getNextNode()} is {@code nodes.get(nextNodeIndex)} (verified directly against
+     * decompiled source) — once {@code nextNodeIndex} reaches {@code nodes.size()}
+     * (i.e. {@code path.isDone()} is {@code true}, a real reachable state: the
+     * navigation's own {@code path} field can complete on its own {@code tick()} before
+     * {@code DragonMoveController} runs its lookahead the same AI step, and nothing
+     * nulls the completed path out), that call throws {@code
+     * IndexOutOfBoundsException}.
+     *
+     * <p>
+     * Drives the guard DIRECTLY and deterministically rather than racing real tick
+     * timing to reach {@code isDone()} (a tick-window dependency C7 rules out): builds a
+     * real multi-node {@code Path} via {@code navigation.moveTo}, then mechanically
+     * calls {@code Path#advance()} — a plain method call, not tick-based — until {@code
+     * path.isDone()} is confirmed {@code true}, arms the move controller's {@code
+     * MOVE_TO} operation via the public {@code setWantedPosition} (a wanted position far
+     * enough from the dragon's own position that the controller's "already arrived"
+     * early return does not short-circuit before the lookahead runs), and calls {@code
+     * DragonMoveController.tick()} directly.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, this throws {@code IndexOutOfBoundsException} and
+     * the gametest framework reports the test as failed; post-fix, the {@code
+     * !path.isDone()} guard skips the lookahead entirely for a completed path and {@code
+     * tick()} returns normally.
+     */
+    @EmptyTemplate(SMALL_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void moveControllerDoesNotThrowWhenPathIsAlreadyDone(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(14, 0, 14), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 7));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var navigation = dragon.getNavigation();
+        BlockPos target = helper.absolutePos(new BlockPos(5, 2, 7));
+        boolean started = navigation.moveTo(target.getX(), target.getY(), target.getZ(), 1, 1.0);
+        Path path = navigation.getPath();
+        if (!started || path == null || path.getNodeCount() < 1) {
+            helper.fail("DIAGNOSTIC setup failed to establish a live path before completing it: started=" + started
+                    + " path=" + (path == null ? "null" : ("nodeCount=" + path.getNodeCount())));
+            return;
+        }
+
+        // Mechanically complete the path — a plain method-call loop, NOT a tick race —
+        // then confirm the precondition this test needs before exercising the
+        // controller.
+        int guardBound = path.getNodeCount() + 1;
+        for (int i = 0; i < guardBound && !path.isDone(); i++) {
+            path.advance();
+        }
+        if (!path.isDone()) {
+            helper.fail("DIAGNOSTIC setup failed to mechanically drive the path to isDone()==true");
+            return;
+        }
+
+        dragon.getMoveControl().setWantedPosition(target.getX() + 5, target.getY(), target.getZ(), 1.0);
+
+        try {
+            dragon.getMoveControl().tick();
+        } catch (IndexOutOfBoundsException e) {
+            helper.fail("DragonMoveController.tick() threw IndexOutOfBoundsException against a completed"
+                    + " (isDone()==true) path — the next-node water lookahead called getNextNode() without"
+                    + " first checking path.isDone(): " + e);
+            return;
+        }
+
+        helper.succeed();
+    }
 }

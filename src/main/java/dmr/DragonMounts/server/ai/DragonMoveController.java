@@ -60,10 +60,20 @@ public class DragonMoveController extends MoveControl {
                 speed = (float) (this.speedModifier * this.mob.getAttributeValue(Attributes.FLYING_SPEED));
             }
 
+            // W8-PF7a (split out of the REJECTED W8-PF7 per the gate's explicit
+            // instruction — "this part is correct as written"): guard the next-node
+            // water lookahead with path.isDone(). Pre-fix, once nextNodeIndex reached
+            // nodes.size() (a completed-but-not-yet-null path — PathNavigation.isDone()
+            // only becomes true when the path is null OR the last node has been
+            // consumed, and this controller runs the same tick as navigation's own
+            // tick()), Path.getNextNode() -> getNode(nextNodeIndex) threw
+            // IndexOutOfBoundsException. Also drops the redundant discarded
+            // getNextNode() call the previous version made before the one it actually
+            // used the result of.
+            var path = mob.getNavigation().getPath();
             if (!isInWater) {
-                if (mob.getNavigation().getPath() != null) {
-                    mob.getNavigation().getPath().getNextNode();
-                    var type = mob.getNavigation().getPath().getNextNode().type;
+                if (path != null && !path.isDone()) {
+                    var type = path.getNextNode().type;
                     if (type == PathType.WATER || type == PathType.WATER_BORDER) {
                         isInWater = true;
                     }
