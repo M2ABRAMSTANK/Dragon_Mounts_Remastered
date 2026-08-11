@@ -455,25 +455,77 @@ public class DragonWhistleTests {
     }
 
     /**
-     * Tests that a dragon follows the player when called with a whistle.
+     * Tests that a dragon follows the player when called with a whistle (walk
+     * branch — the dragon stays out of sight and closes distance under its own AI,
+     * as opposed to {@link #fortyBlockSummonUsesTeleportBranchNotWalkBranch}'s
+     * teleport branch).
      *
      * <p>
-     * This test verifies that:
-     * 1. A dragon can be tamed and bound to a whistle
-     * 2. When called with a whistle, the dragon will follow the player
-     * 3. The dragon will teleport to the player if it's too far away
+     * W8-SUMMON-5 (de-vacuum): the original version displaced the dragon by
+     * {@code +5,+5} (~7.07 blocks) — already INSIDE {@code ServerConfig
+     * .MAX_FOLLOW_DISTANCE} (8), so {@code StayCloseToTarget}'s "too close" cutoff
+     * meant the follow AI never needed to run at all; the {@code > 10} assertion
+     * passed on the setup alone, before a single tick of AI ran. Rewritten per the
+     * gate's amendment to a 14-block SINGLE-axis displacement (comfortably outside
+     * {@code MAX_FOLLOW_DISTANCE}, well inside the default 32-block walk band) and a
+     * MONOTONE PROGRESS assertion — final separation strictly less than initial,
+     * and within {@code MAX_FOLLOW_DISTANCE} plus a small margin — rather than
+     * convergence within a hard tick cap. Driven via {@code helper.onEachTick}/
+     * {@code helper.succeedWhen} (this file's own established pattern for
+     * AI-dependent convergence, e.g. {@code DragonTests#willNotAttackTamed}), tying
+     * each check to a genuine server tick. The test's default 100-tick
+     * {@code @GameTest} timeout (unmodified — no DMR test override, per commit 8's
+     * own established precedent) IS the hard cap: if a genuine regression makes
+     * convergence slower than that, the test times out and fails loudly — correct
+     * behavior, not a poll-forever.
+     *
+     * <p>
+     * {@code @EmptyTemplate(LARGE_TEMPLATE)}, not the file's usual small
+     * {@code floor = true} platform: this test's first RED attempt (14-block
+     * single-axis displacement, monotone-progress assertion, on the default 3x3x3
+     * footprint) stayed stuck at exactly the initial 14.0-block separation for the
+     * full 100-tick window — empirically confirmed (see red-baseline.md) to be
+     * because the default footprint leaves no generated/loaded terrain past ~1.5
+     * blocks from spawn, so the dragon simply cannot compute a path to a target
+     * that far outside it; this is indistinguishable from a genuine walk-branch
+     * regression without the isolation check below. A follow-up isolation run
+     * (same footprint bug fixed, but reverted to a manual synchronous {@code for}
+     * loop calling {@code tick()} 100 times within one real gametest tick) also
+     * PASSED — disproving an earlier draft of this comment that attributed the
+     * original failure to {@code level.getGameTime()} not advancing across manual
+     * calls. The manual loop works fine once the terrain is real; {@code
+     * onEachTick} is kept regardless purely for consistency with this file's other
+     * AI-convergence tests, not because it is load-bearing for this test's
+     * correctness.
+     *
+     * <p>
+     * Walk-branch convergence QUALITY (how fast, how reliably) is owned by the
+     * pathfind area this wave (streamlinePath's beeline bug, the 5-tick {@code
+     * createPath} throttle, etc. — see refute-summon.json missedBugs #1/#2/#4);
+     * coupling this summon-area test to another area's fixes landing in the same
+     * wave is an accepted release risk, per the gate's explicit instruction to state
+     * it in writing rather than leave it silent.
      *
      * @param helper The game test helper
      */
-    @EmptyTemplate(floor = true)
+    @EmptyTemplate(LARGE_TEMPLATE)
     @GameTest
     @TestHolder
     public static void dragonFollowsWhenCalled(ExtendedGameTestHelper helper) {
+        // LARGE_TEMPLATE, not the usual small floor=true platform (see that constant's
+        // javadoc): this test needs the dragon to actually WALK 14 real blocks across
+        // pathable ground over dozens of ticks, and the default 3x3x3 footprint leaves
+        // no generated/loaded terrain for a target that far out — the dragon simply
+        // cannot path there and sits motionless, which is indistinguishable from a
+        // genuine walk-branch regression (confirmed empirically: see red-baseline.md).
+        // Both entities are placed near the structure's center so a 14-block
+        // single-axis offset stays comfortably inside the loaded/generated area.
         var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
-        player.moveToCentre();
+        var centerPos = Vec3.atCenterOf(helper.absolutePos(new BlockPos(80, 2, 80)));
+        player.moveTo(centerPos.x, centerPos.y, centerPos.z);
 
         // Spawn and tame a dragon
-        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(80, 2, 80));
         dragon.setBreed(DragonBreedsRegistry.getDefault());
         dragon.tamedFor(player, true);
 
@@ -495,29 +547,43 @@ public class DragonWhistleTests {
             }
         }
 
-        // Move dragon far away
-        dragon.setPos(dragon.getX() + 5, dragon.getY(), dragon.getZ() + 5);
+        // 14 blocks, single axis — comfortably outside MAX_FOLLOW_DISTANCE (8), well
+        // inside the default 32-block walk band, so the WALK branch (not teleport) is
+        // what actually gets exercised.
+        dragon.setPos(dragon.getX() + 14, dragon.getY(), dragon.getZ());
+
+        double initialSeparation = dragon.position().distanceTo(player.position());
 
         // Call the dragon
         boolean result = DragonWhistleHandler.callDragon(player);
         if (!result) {
             helper.fail("Failed to call dragon");
+            return;
         }
 
-        dragon = DragonWhistleHandler.findDragon(player, 1);
+        var followingDragon = DragonWhistleHandler.findDragon(player, 1);
+        if (followingDragon == null) {
+            helper.fail("Dragon did not resolve after being called — cannot distinguish a broken walk branch"
+                    + " from a resolution miss");
+            return;
+        }
 
-        // Tick entities to allow the dragon to respond
-        for (int i = 0; i < 20; i++) {
+        helper.onEachTick(() -> {
             player.tick();
-            dragon.tick();
-        }
+            followingDragon.tick();
+        });
 
-        // Verify the dragon is now close to the player
-        if (dragon.position().distanceTo(player.position()) > 10) {
-            helper.fail("Dragon did not teleport to player when called");
-        }
-
-        helper.succeed();
+        helper.succeedWhen(() -> {
+            double finalSeparation = followingDragon.position().distanceTo(player.position());
+            helper.assertTrue(
+                    finalSeparation < initialSeparation,
+                    "Dragon has made no progress toward the player after being called — separation went from "
+                            + initialSeparation + " to " + finalSeparation);
+            helper.assertTrue(
+                    finalSeparation <= ServerConfig.MAX_FOLLOW_DISTANCE + 2,
+                    "Dragon has not yet closed to within MAX_FOLLOW_DISTANCE (+2 margin) of the player —"
+                            + " separation is " + finalSeparation);
+        });
     }
 
     /**
@@ -531,6 +597,16 @@ public class DragonWhistleTests {
      *
      * @param helper The game test helper
      */
+    // W8-SUMMON-5: PARKED, not resurrected. Root cause never diagnosed in this pass —
+    // the leading suspect is the cumulative ~+-70-block SAME-DIMENSION displacement
+    // (below) pushing dragons outside the gametest structure's loaded/generated chunk
+    // range (mirrors, but is not identical to, DET-1's chunk-load-timing shape); a
+    // second candidate is an unrelated interaction with setNoAi(true)/setNoGravity(true)
+    // and the teleport branch. dragonFollowsWhenCalled (walk convergence) and
+    // fortyBlockSummonUsesTeleportBranchNotWalkBranch (same-dimension teleport
+    // boundary, commit 16) independently close the coverage gap this test was meant to
+    // provide, WITHOUT depending on diagnosing this displacement/structure interaction
+    // — do not re-enable this test believing it was silently fixed by either of those.
     // TODO Fix this test
     // @EmptyTemplate(floor = true)
     // @GameTest
