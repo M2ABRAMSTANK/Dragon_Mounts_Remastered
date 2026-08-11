@@ -1019,6 +1019,117 @@ public class DragonWhistleTests {
     }
 
     /**
+     * Fix-round (summon-behavior cluster) requiredChange #1: covers commit 16's
+     * (W8-SUMMON-1a, {@code 8ffbbd7}) actual THRESHOLD FLIP at the walk/teleport
+     * call site in {@code summonExistingDragon}, not just the pure {@code
+     * isWithinWalkRange}/{@code walkSummonMaxDistance} helpers it delegates to.
+     *
+     * <p>
+     * An adversarial review found every distance already exercised by this suite
+     * sits outside the "discriminating band" the flip actually changed:
+     * {@link #sameDimensionTeleportRefreshesDragonInstanceBinding} uses 80 blocks,
+     * {@link #dragonFollowsWhenCalled} uses ~7, and
+     * {@link #walkBranchSummonSendsExactlyOneFeedbackMessage} uses 6 — none of
+     * those falls inside 33-64, the band that used to WALK under the pre-fix
+     * {@code DragonConstants.BASE_FOLLOW_RANGE * ModConstants.DragonConstants
+     * .FOLLOW_RANGE_MULTIPLIER} (32 * 2 = 64) product and now TELEPORTS under the
+     * post-fix default (0.0 override -&gt; live {@code generic.follow_range}
+     * attribute, 32 by default, clamped by {@code walkSummonMaxDistance}). Proof:
+     * reverting the call site back to that pre-fix constant product leaves every
+     * one of the tests above, and all other suite tests, green. This test places
+     * the dragon 40 blocks away — inside the OLD 0-64 walk band, outside the NEW
+     * default 0-32 one — so it can only pass if the call site actually reads the
+     * shrunk threshold rather than the old constant.
+     *
+     * <p>
+     * Displacement is VERTICAL ({@code setPos} y+40, held with {@code
+     * setNoGravity(true)}) rather than horizontal, matching commit 20's amended
+     * spec for this same class of boundary test: it keeps the dragon in the SAME
+     * chunk column as the player, so — unlike a large horizontal offset — it
+     * cannot spill into unticketed/unloaded terrain or a neighbouring gametest's
+     * structure (the leading suspect recorded against the parked
+     * {@code callMultipleDragons}'s +-70-block displacement) and needs no
+     * {@code LARGE_TEMPLATE}/chunk-ticketing workaround the way
+     * {@link #sameDimensionTeleportRefreshesDragonInstanceBinding}'s 80-block
+     * horizontal displacement did.
+     *
+     * <p>
+     * The resolution precondition ({@code findDragon(player, idx) == dragon}) is
+     * asserted BEFORE the immediate post-call distance check, so a
+     * deferred-summon resolution miss (which lets {@code callDragon} return
+     * {@code true} without teleporting anything — the exact false-negative shape
+     * {@link #sameDimensionTeleportRefreshesDragonInstanceBinding} hit before its
+     * template was widened) is distinguishable from a genuinely broken teleport
+     * branch. No tick window is used or needed: the teleport happens
+     * synchronously inside {@code callDragon}, so this is C7-clean with no
+     * tick-window absence assertion.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void fortyBlockSummonUsesTeleportBranchNotWalkBranch(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        // getDragonSummonIndex (callDragon's own gate) requires the player to
+        // actually be HOLDING a whistle whose color id matches the bound index.
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        // VERTICAL displacement, same chunk column as the player: 40 blocks is
+        // inside the pre-fix 0-64 walk band and outside the post-fix default 0-32
+        // one — the exact band this fix-round found uncovered. setNoGravity is
+        // precautionary (this test never ticks the dragon, so gravity cannot act
+        // before the synchronous callDragon call below), mirroring the existing
+        // precedent in the parked callMultipleDragons test.
+        dragon.setNoGravity(true);
+        dragon.setPos(dragon.getX(), dragon.getY() + 40, dragon.getZ());
+
+        boolean called = DragonWhistleHandler.callDragon(player);
+        if (!called) {
+            helper.fail("callDragon reported failure for a plain, uncontested 40-block summon");
+            return;
+        }
+
+        var resolved = DragonWhistleHandler.findDragon(player, index);
+        if (resolved != dragon) {
+            helper.fail("callDragon did not resolve back to the original dragon (a deferred-summon"
+                    + " resolution miss) — cannot distinguish a broken teleport branch from a resolution"
+                    + " miss until this precondition holds");
+            return;
+        }
+
+        double distance = dragon.position().distanceTo(player.position());
+        if (distance >= 2) {
+            helper.fail("A 40-block summon (inside the pre-fix 0-64 walk band, outside the post-fix"
+                    + " default 0-32 one) did not teleport the dragon to the player — distance after"
+                    + " callDragon was " + distance + " (expected < 2). A call site still reading the old"
+                    + " BASE_FOLLOW_RANGE*FOLLOW_RANGE_MULTIPLIER product (commit 16 / W8-SUMMON-1a"
+                    + " reverted) would take the WALK branch here instead and leave the dragon far away.");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
      * W8-SUMMON-2 (null-UUID hardening) regression: {@code
      * DragonOwnerCapability#isBoundToWhistle} must not NPE when one of the player's
      * {@link DragonInstance} entries has a null dragonUUID (a legacy entry that
