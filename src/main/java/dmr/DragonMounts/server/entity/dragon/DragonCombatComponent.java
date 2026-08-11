@@ -1,6 +1,7 @@
 package dmr.DragonMounts.server.entity.dragon;
 
 import dmr.DragonMounts.server.ai.DragonAI;
+import dmr.DragonMounts.server.ai.teams.DragonAllyService;
 import java.util.Objects;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
@@ -96,8 +97,26 @@ abstract class DragonCombatComponent extends DragonBreedableComponent {
 
     /**
      * Checks if the dragon wants to attack a specific target.
+     *
+     * <p>
+     * W8-TEAMS-2: both vanilla {@code OwnerHurtByTargetGoal} and {@code
+     * OwnerHurtTargetGoal} already call this hook from their own {@code canUse()}
+     * (decompiled sources, verified against the actual {@code 21.1.176} jar: {@code
+     * this.tameAnimal.wantsToAttack(this.ownerLastHurt(By), livingentity)}) — so extending
+     * it here, rather than adding two new {@code Goal} subclasses, covers both owner-assist
+     * paths (and any future goal or mod that respects the same hook) in one place. A
+     * teammate is refused BEFORE the pre-existing pet-ownership check, so the dragon never
+     * assists the owner against — nor is stirred by the owner-hurt-by path to defend the
+     * owner against — a teammate, matching the operator's unconditional "must never turn
+     * hostile" ask. {@code HurtByTargetGoal} does NOT consult this hook (verified: its
+     * {@code canUse()} only calls {@code this.canAttack(livingentity, HURT_BY_TARGETING)}),
+     * so it gets its own thin {@code canUse()}-gated subclass instead — see {@code
+     * DragonHurtByTargetGoal}.
      */
     public boolean wantsToAttack(LivingEntity target, LivingEntity owner) {
+        if (DragonAllyService.isTeammateOfOwner(getDragon(), target)) {
+            return false;
+        }
         if (target instanceof TamableAnimal tameable) {
             LivingEntity tamableOwner = tameable.getOwner();
             return !Objects.equals(tamableOwner, owner);

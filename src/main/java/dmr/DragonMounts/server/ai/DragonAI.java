@@ -10,6 +10,8 @@ import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModMemoryModuleTypes;
 import dmr.DragonMounts.registry.ModSensors;
 import dmr.DragonMounts.server.ai.behaviours.*;
+import dmr.DragonMounts.server.ai.goals.DragonHurtByTargetGoal;
+import dmr.DragonMounts.server.ai.teams.DragonAllyService;
 import dmr.DragonMounts.server.entity.DragonAgroState;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import java.util.Collection;
@@ -23,7 +25,6 @@ import net.minecraft.world.entity.ai.Brain;
 import net.minecraft.world.entity.ai.behavior.*;
 import net.minecraft.world.entity.ai.behavior.GateBehavior.OrderPolicy;
 import net.minecraft.world.entity.ai.behavior.GateBehavior.RunningPolicy;
-import net.minecraft.world.entity.ai.goal.target.HurtByTargetGoal;
 import net.minecraft.world.entity.ai.goal.target.OwnerHurtByTargetGoal;
 import net.minecraft.world.entity.ai.goal.target.OwnerHurtTargetGoal;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
@@ -195,7 +196,8 @@ public class DragonAI {
                 createBreathAttackBehavior(),
                 createMeleeAttackBehavior(),
                 StopAttackingIfTargetInvalid.create(),
-                EraseMemoryIf.<Mob>create(BehaviorUtils::isBreeding, MemoryModuleType.ATTACK_TARGET));
+                EraseMemoryIf.<Mob>create(BehaviorUtils::isBreeding, MemoryModuleType.ATTACK_TARGET),
+                EraseMemoryIf.<Mob>create(DragonAI::eraseTeammateAttackTarget, MemoryModuleType.ATTACK_TARGET));
 
         brain.addActivityAndRemoveMemoryWhenStopped(Activity.FIGHT, 0, fightBehaviors, MemoryModuleType.ATTACK_TARGET);
     }
@@ -284,7 +286,10 @@ public class DragonAI {
         return BehaviorFactory.withCondition(
                 dr -> dr.isTame() && dr.getAgroState() != DragonAgroState.PASSIVE,
                 BehaviorFactory.withGoals(
-                        e -> true, OwnerHurtByTargetGoal::new, OwnerHurtTargetGoal::new, HurtByTargetGoal::new));
+                        e -> true,
+                        OwnerHurtByTargetGoal::new,
+                        OwnerHurtTargetGoal::new,
+                        DragonHurtByTargetGoal::new));
     }
 
     /**
@@ -549,10 +554,27 @@ public class DragonAI {
 
     /**
      * Determines if the dragon should retaliate against an entity.
+     *
+     * <p>
+     * W8-TEAMS-2/T3-S3: the teammate gate is the FIRST statement, before any of
+     * {@code isTargetTooFarAway}/{@code isTargetAttackable}'s {@code BehaviorUtils} work
+     * runs, so a refused teammate costs nothing extra. This is the PRIMARY fix for the
+     * operator's "accidental friendly fire" complaint: this synchronous path (called
+     * inline from {@code DragonCombatComponent#hurt}) is the dragon's IMMEDIATE, same-tick
+     * reaction to being hit — {@link Sensor#isEntityAttackable} already routes through
+     * {@code TargetingConditions#test}, which evaluates vanilla {@code isAlliedTo}, so a
+     * vanilla-scoreboard teammate was already spared here before this fix; the real delta
+     * this gate adds is the FTB Teams/Open Parties and Claims path, which had zero
+     * allegiance awareness at all until now.
+     *
      * @param dragon The dragon entity
      * @param target The potential retaliation target
      */
     public static void maybeRetaliate(TameableDragonEntity dragon, LivingEntity target) {
+        if (DragonAllyService.isTeammateOfOwner(dragon, target)) {
+            return;
+        }
+
         boolean isTargetTooFarAway = BehaviorUtils.isOtherTargetMuchFurtherAwayThanCurrentAttackTarget(
                 dragon, target, RETALIATION_DISTANCE_CHECK);
 
@@ -561,6 +583,36 @@ public class DragonAI {
         if (!isTargetTooFarAway && isTargetAttackable) {
             setAttackTarget(dragon, target);
         }
+    }
+
+    /**
+     * W8-TEAMS-2 release path: erases {@code ATTACK_TARGET} (and clears the dragon's
+     * {@code setTarget}) when the held target reads as a teammate of the owner, so a fight
+     * already in progress when a team forms — or one acquired through some other gate's
+     * gap — actually ends, rather than mauling that teammate indefinitely. Without this,
+     * {@code canUse()}-only gates (T3-S3/S4) only stop a teammate being ACQUIRED as a
+     * target; {@code StopAttackingIfTargetInvalid.create()}'s bare no-args form never
+     * drops a target on its own ({@code canStopAttacking} is a constant {@code p -> false},
+     * decompiled sources), and {@code TargetGoal#canContinueToUse} only drops a target on
+     * a VANILLA scoreboard-team match — nothing for the FTB/OPAC path.
+     *
+     * @param mob The entity ticking the FIGHT activity's behaviors (always a {@link
+     *            TameableDragonEntity} in practice; declared as {@code Mob} to match the
+     *            existing {@code EraseMemoryIf.<Mob>create(BehaviorUtils::isBreeding, ...)}
+     *            entry's typing convention in {@link #initFightActivity})
+     * @return true (and clears the target) iff the currently-held attack target is a
+     *         teammate of the dragon's owner
+     */
+    private static boolean eraseTeammateAttackTarget(Mob mob) {
+        if (!(mob instanceof TameableDragonEntity dragon)) {
+            return false;
+        }
+        LivingEntity target = dragon.getTarget();
+        if (target != null && DragonAllyService.isTeammateOfOwner(dragon, target)) {
+            dragon.setTarget(null);
+            return true;
+        }
+        return false;
     }
 
     /**
