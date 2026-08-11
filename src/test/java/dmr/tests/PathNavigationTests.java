@@ -3,8 +3,10 @@ package dmr.tests;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.server.ai.navigation.DragonNodeEvaluator;
+import dmr.DragonMounts.server.ai.navigation.DragonPathNavigation;
 import dmr.DragonMounts.types.dragonBreeds.DragonBreed;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.List;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -16,6 +18,7 @@ import net.minecraft.world.level.block.state.properties.DoorHingeSide;
 import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 import net.minecraft.world.level.pathfinder.NodeEvaluator;
 import net.minecraft.world.level.pathfinder.Path;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import net.neoforged.testframework.annotation.ForEachTest;
 import net.neoforged.testframework.annotation.TestHolder;
@@ -610,5 +613,240 @@ public class PathNavigationTests {
         }
 
         helper.succeed();
+    }
+
+    // ---------------------------------------------------------------------------------
+    // W8-PF1 / W8-PF6 (commit 5)
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * W8-PF1. Spawns a dragon and a target 20 blocks away in completely open air (no
+     * obstacles) and calls {@code createPath} directly. Asserts the returned path's
+     * {@code nextNodeIndex} was NOT collapsed toward the final node.
+     *
+     * <p>
+     * AMENDED per the gate: the throttle-vs-collapse ordering matters. {@code
+     * DragonPathNavigation.createPath} returns {@code null} unconditionally for the
+     * FIRST call after construction ({@code lastPathCreationDelta} starts at 0, {@code
+     * TICKS_BETWEEN_PATH_CREATIONS = 5}) — asserting {@code path != null} must happen
+     * BEFORE asserting on {@code getNextNodeIndex()}, or a pre-fix "red" run would
+     * actually be failing on a throttle NPE rather than on node-index collapse, proving
+     * nothing about the actual bug.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, {@code streamlinePath}'s {@code closestNodeDist}
+     * starts at {@code -1} and its {@code distFromPlayer < closestNodeDist ||
+     * distFromPlayer > distFromDragon} OR-condition is true for essentially every node
+     * of a monotonic straight-line path (verified by hand: for the first half of the
+     * route {@code distFromPlayer > distFromDragon}; for the second half {@code
+     * distFromPlayer} is strictly decreasing so it is always less than the previous
+     * iteration's {@code closestNodeDist}) — {@code skipToNodeIndex} walks all the way to
+     * the LAST node, and {@code setNextNodeIndex} commits that collapse into the path the
+     * dragon actually follows.
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void flightPathIsNotCollapsedToFinalNode(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(24, 0, 4), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 2));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos target = helper.absolutePos(new BlockPos(22, 2, 2));
+        Path path = navigation.createPath(target, 1);
+
+        if (path == null) {
+            helper.fail("createPath returned null after clearing the 5-tick throttle — this assertion must run"
+                    + " AFTER the throttle window, not before it, or a red run proves nothing about node collapse");
+            return;
+        }
+        if (path.getNodeCount() <= 1) {
+            helper.fail("Path has too few nodes (" + path.getNodeCount() + ") over a 20-block open-air route");
+            return;
+        }
+        if (path.getNextNodeIndex() >= path.getNodeCount() - 1) {
+            helper.fail("Path's nextNodeIndex (" + path.getNextNodeIndex() + ") was collapsed to the final node ("
+                    + (path.getNodeCount() - 1) + " of " + path.getNodeCount()
+                    + ") — streamlinePath is still beelining the dragon to the terminal waypoint");
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-PF1. Builds a wall spanning the direct line between the dragon and a target 6
+     * blocks past it, with a gap offset to one side (z=0-3 of a 15-wide z=0-14 corridor
+     * at the wall; dragon and target both sit at z=4 — just ONE block inside the wall's
+     * blocked z-range — so the straight line between them is fully obstructed and any
+     * successful route MUST detour sideways through the gap, but the "return climb" leg
+     * of that detour is as short as it can be while still requiring one).
+     *
+     * <p>
+     * AMENDED per the gate: the original design's stall proxy ("N consecutive ticks with
+     * near-zero position delta") is a timing-shaped assertion C7 rules out given DET-1.
+     * Replaced with a deterministic assertion on the computed {@code Path} object
+     * itself: {@code canReach() == true}, AND at least one node's z-coordinate falls
+     * inside the gap's z-range — proving a real detour was both COMPUTED and RETAINED in
+     * the final path (not merely discoverable by A* and then immediately collapsed away
+     * by {@code streamlinePath}, which is exactly what "computed but not retained" looked
+     * like pre-fix).
+     *
+     * <p>
+     * <b>Why the geometry is this tight (three earlier, more "natural" revisions all
+     * produced a Path with canReach()==false EVEN WITH the fix applied, i.e. a false
+     * failure unrelated to W8-PF1/W8-PF6):</b> a 20-block separation with a several-block
+     * detour, then a 6-block separation with a 3-block return-climb, both consistently
+     * stalled a few blocks short of the target — always past the wall in x, always still
+     * short in z, regardless of the {@code accuracy} parameter passed to {@code
+     * createPath} (tried 0, 2, and a deliberately-too-generous 10, which is why that
+     * value must never be used here — it would let the search terminate the instant ANY
+     * explored node is merely "close enough," which for a generous accuracy can include
+     * the very first candidates near spawn, making the assertion pass without the detour
+     * ever being exercised at all). The exact mechanism was not fully pinned down (the
+     * search visits far fewer nodes than {@code PathFinder}'s budget allows, so it is not
+     * a simple maxVisitedNodes exhaustion), but shrinking the detour's return-climb leg
+     * to a single block consistently resolved it across every geometry tried. Recorded
+     * here, with the specific failure shape, so a future revision of this test does not
+     * silently reintroduce a longer return-climb leg and reproduce a false failure.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, even when A* successfully finds a detour route
+     * through the gap, {@code streamlinePath} collapses {@code nextNodeIndex} toward the
+     * final node exactly as in {@link #flightPathIsNotCollapsedToFinalNode} above,
+     * discarding the detour waypoints from the path the dragon actually follows — the
+     * dragon is told to beeline for the far side, straight into the wall.
+     */
+    @EmptyTemplate(SMALL_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void dragonRoutesAroundObstacleInsteadOfStalling(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(14, 0, 14), Blocks.STONE.defaultBlockState());
+        // Wall at x=5, spanning z=4-14 (11 deep) and y=1-3 (3 tall), leaving a 4-wide gap
+        // at z=0-3. Dragon and target both sit at z=4 — only ONE block inside the wall's
+        // blocked span — minimizing the return-climb leg of the detour to a single step.
+        fillBox(helper, new BlockPos(5, 1, 4), new BlockPos(5, 3, 14), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 4));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos target = helper.absolutePos(new BlockPos(8, 2, 4));
+        Path path = navigation.createPath(target, 0);
+
+        if (path == null || !path.canReach()) {
+            StringBuilder nodes = new StringBuilder();
+            if (path != null) {
+                for (int i = 0; i < path.getNodeCount(); i++) {
+                    nodes.append(path.getNodePos(i)).append(' ');
+                }
+            }
+            helper.fail("DIAGNOSTIC path did not reach around the obstacle: path="
+                    + (path == null ? "null" : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount() + " nodes=" + nodes))
+                    + " target=" + target);
+            return;
+        }
+
+        // The gap is at relative z=0-3; convert each node's absolute z back to relative
+        // via the same origin fillBox/spawn coordinates were expressed in.
+        //
+        // CRITICAL: this must scan from getNextNodeIndex() onward, NOT from index 0.
+        // streamlinePath (pre-fix) only mutates nextNodeIndex — it never removes nodes
+        // from the underlying list — so a scan over the WHOLE node list would find the
+        // gap-range detour node regardless of whether the fix is applied, making the
+        // assertion pass identically pre- and post-fix (confirmed empirically: an
+        // earlier revision of this assertion scanned from 0 and passed on unmodified
+        // HEAD, exactly the vacuous-test trap this wave's red-baseline gate exists to
+        // catch). Scanning from nextNodeIndex checks what the dragon will ACTUALLY walk,
+        // which is precisely what streamlinePath corrupts.
+        BlockPos origin = helper.absolutePos(new BlockPos(0, 0, 0));
+        boolean routedThroughGap = false;
+        for (int i = path.getNextNodeIndex(); i < path.getNodeCount(); i++) {
+            int relativeZ = path.getNodePos(i).getZ() - origin.getZ();
+            if (relativeZ >= 0 && relativeZ <= 3) {
+                routedThroughGap = true;
+                break;
+            }
+        }
+        if (!routedThroughGap) {
+            helper.fail("Path reached the target but the RETAINED portion (from nextNodeIndex=" + path.getNextNodeIndex()
+                    + " onward) contains no node within the gap's z-range (0-3) — the wall fully blocks z=4-14 at"
+                    + " x=5, so a genuinely retained detour MUST pass through the gap; this means the detour was"
+                    + " computed but discarded from the path the dragon will actually follow");
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-PF6. Directly invokes {@code DragonPathNavigation.canMoveDirectly} (via
+     * reflection — it is {@code protected}) with two points a few blocks apart in
+     * completely open air, on a dragon with {@code isFlying() == true}. Asserts it
+     * returns {@code true}.
+     *
+     * <p>
+     * AMENDED per the gate: the original design's tick-budget/1.3x-tolerance timing
+     * comparison is exactly the flaky shape C7 rules out, AND is structurally
+     * unachievable as literally specified — {@code PathNavigation.followThePath} calls
+     * {@code this.path.advance()} AT MOST ONCE per invocation (verified by direct read of
+     * the decompiled source: no loop around the corner-cut arm), so {@code
+     * getNextNodeIndex()} cannot advance by more than one within a single {@code
+     * followThePath()}/tick call by the vanilla mechanism itself, regardless of this fix.
+     * The gate's own offered alternative — "expose a package-visible test seam for
+     * canMoveDirectly" — is used instead: this test invokes the method directly via
+     * reflection (matching this class's established pattern for protected/package-private
+     * members, see {@link #assertDelegateTornDown}) and asserts on its return value
+     * directly, which is the actual behavior this fix changes.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, {@code canMoveDirectly} only ever returned {@code
+     * true} for the swim case ({@code allowSwimming && mob.isInLiquid()}) — for a flying,
+     * non-aquatic dragon it returned {@code false} unconditionally, regardless of how
+     * clear the line of sight was, disabling {@code PathNavigation.followThePath}'s
+     * corner-cut arm for flight entirely.
+     */
+    @EmptyTemplate(SMALL_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void flightCornerCuttingIsEnabledWhileFlying(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(14, 0, 14), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 7));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        DragonPathNavigation navigation = (DragonPathNavigation) dragon.getNavigation();
+
+        Vec3 from = Vec3.atCenterOf(helper.absolutePos(new BlockPos(2, 2, 7)));
+        Vec3 to = Vec3.atCenterOf(helper.absolutePos(new BlockPos(6, 2, 7)));
+
+        boolean canMoveDirectly = invokeCanMoveDirectly(navigation, from, to);
+        if (!canMoveDirectly) {
+            helper.fail("canMoveDirectly() returned false for a flying dragon with a completely clear line of"
+                    + " sight — corner-cutting is disabled for flight");
+        }
+
+        helper.succeed();
+    }
+
+    private static boolean invokeCanMoveDirectly(DragonPathNavigation navigation, Vec3 from, Vec3 to) {
+        try {
+            Method method = DragonPathNavigation.class.getDeclaredMethod("canMoveDirectly", Vec3.class, Vec3.class);
+            method.setAccessible(true);
+            return (boolean) method.invoke(navigation, from, to);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to invoke canMoveDirectly via reflection", e);
+        }
     }
 }

@@ -112,37 +112,23 @@ public class DragonPathNavigation extends FlyingPathNavigation {
         return createPathWithFlyingAllowed(pos, accuracy);
     }
 
+    // W8-PF1: streamlinePath deleted entirely. It scanned the WHOLE computed path and
+    // advanced nextNodeIndex to whichever node was closest to (or farther from, per its
+    // own inverted-looking OR condition) the target, which for a normal multi-waypoint
+    // route collapsed nextNodeIndex almost to the LAST node — the dragon was told to
+    // beeline for the terminal node from tick one instead of following the intermediate
+    // waypoints A* actually computed to route around obstacles. The mutation survives
+    // into the live path (PathNavigation.moveTo only swaps paths via a coordinate-only
+    // `sameAs` check, so a collapsed nextNodeIndex is never corrected), so this was the
+    // literal cause of flying dragons beelining into obstacles and stalling instead of
+    // routing around them. The motivating scenario ("a mid-flight repath that briefly
+    // backtracks") is a real, separate concern, but this unbounded whole-path scan is
+    // not a safe way to address it; a future fix should be a BOUNDED prefix trim
+    // restricted to `index < path.getNextNodeIndex()` (nodes strictly already passed),
+    // never advancing past the current waypoint.
     private Path createPathWithFlyingAllowed(BlockPos pos, int accuracy) {
         dragonNodeEvaluator.allowFlying = true;
-
-        Path path = super.createPath(pos, accuracy);
-        if (path == null) {
-            return path;
-        }
-
-        // If we can skip nodes that get the dragon farther away from the player to stop the dragon from travelling back
-        // when it doesn't need to, then we skip them.
-        return streamlinePath(path, pos);
-    }
-
-    private Path streamlinePath(Path path, BlockPos pos) {
-        int closestNodeDist = -1;
-        int skipToNodeIndex = 0;
-        for (int i = 0; i < path.getNodeCount(); i++) {
-            BlockPos nodePos = path.getNodePos(i);
-            int distFromDragon = mob.blockPosition().distManhattan(nodePos);
-            int distFromPlayer = pos.distManhattan(nodePos);
-            if (distFromPlayer < closestNodeDist || distFromPlayer > distFromDragon) {
-                closestNodeDist = distFromPlayer;
-                skipToNodeIndex = i;
-            } else {
-                break;
-            }
-        }
-
-        path.setNextNodeIndex(skipToNodeIndex);
-
-        return path;
+        return super.createPath(pos, accuracy);
     }
 
     @Override
@@ -150,11 +136,37 @@ public class DragonPathNavigation extends FlyingPathNavigation {
         return true;
     }
 
+    // W8-PF6: restores vanilla FlyingPathNavigation.canMoveDirectly's unconditional
+    // line-of-sight corner-cut for the flying case, gated on dragon.isFlying() rather
+    // than the previous unconditional-false-for-flight behavior (this override
+    // previously only ever returned true for the swim case, disabling corner-cutting
+    // entirely for flight). Consumed by PathNavigation.followThePath's
+    // `canCutCorner(...) && shouldTargetNextNodeInDirection(...)` OR-arm, which lets a
+    // 2.75-wide dragon advance past waypoints it has clear line-of-sight to instead of
+    // being forced to physically arrive within maxDistanceToWaypoint (bbWidth/2 = 1.375
+    // blocks) of every single node — directly depends on W8-PF1 above: with the beeline
+    // bug in place the dragon rarely had real intermediate waypoints to corner-cut
+    // between in the first place.
+    //
+    // Keyed on dragon.isFlying() (the LIVE flight state) rather than
+    // dragonNodeEvaluator.allowFlying: that field reflects the mode of the LAST
+    // createPath() call, not necessarily the path currently being followed --
+    // DragonPathNavigation is shared by StayCloseToTarget/MoveToTargetSink/attack
+    // targeting/RandomStroll/recomputePath, so a walk-mode repath issued by one consumer
+    // while a flight path computed moments earlier is still being followed would read
+    // allowFlying=false and silently disable corner-cutting for a path that IS a flight
+    // path. dragon.isFlying() is not similarly aliased by unrelated repaths. (This same
+    // staleness class already affects getGroundY/isStableDestination below, which read
+    // the same mutable flags for a different purpose; parked, not widened here.)
     @Override
     protected boolean canMoveDirectly(Vec3 p_217796_, Vec3 p_217797_) {
-        return (dragonNodeEvaluator.allowSwimming
+        if (dragon.isFlying()) {
+            return isClearForMovementBetween(this.mob, p_217796_, p_217797_, true);
+        }
+
+        return dragonNodeEvaluator.allowSwimming
                 && this.mob.isInLiquid()
-                && isClearForMovementBetween(this.mob, p_217796_, p_217797_, true));
+                && isClearForMovementBetween(this.mob, p_217796_, p_217797_, true);
     }
 
     public boolean isStableDestination(BlockPos pPos) {
