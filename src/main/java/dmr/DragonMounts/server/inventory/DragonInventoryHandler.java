@@ -2,6 +2,7 @@ package dmr.DragonMounts.server.inventory;
 
 import dmr.DragonMounts.DMR;
 import dmr.DragonMounts.common.capability.types.NBTInterface;
+import dmr.DragonMounts.config.ServerConfig;
 import dmr.DragonMounts.network.packets.ClearDragonInventoryPacket;
 import dmr.DragonMounts.network.packets.RequestDragonInventoryPacket;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
@@ -41,6 +42,10 @@ public class DragonInventoryHandler {
         }
 
         if (startTracking.getTarget() instanceof TameableDragonEntity dragon) {
+            if (ServerConfig.LOG_DRAGON_TRACKING_EVENTS) {
+                logTrackingEvent("START", (ServerPlayer) startTracking.getEntity(), dragon);
+            }
+
             var dragonInventory = getOrCreateInventory(dragon);
             PacketDistributor.sendToPlayer(
                     (ServerPlayer) startTracking.getEntity(),
@@ -55,9 +60,35 @@ public class DragonInventoryHandler {
         }
 
         if (stopTracking.getTarget() instanceof TameableDragonEntity dragon) {
+            if (ServerConfig.LOG_DRAGON_TRACKING_EVENTS) {
+                logTrackingEvent("STOP", (ServerPlayer) stopTracking.getEntity(), dragon);
+            }
+
             PacketDistributor.sendToPlayer(
                     (ServerPlayer) stopTracking.getEntity(), new ClearDragonInventoryPacket(dragon.getDragonUUID()));
         }
+    }
+
+    /**
+     * W8-SYNC-7: config-gated (default OFF, see {@link ServerConfig#LOG_DRAGON_TRACKING_EVENTS})
+     * diagnostic for the invisible-dragon-until-relog symptom. Reads dragonUUID and the real
+     * entity UUID straight off {@code dragon} rather than going through
+     * {@link #getOrCreateInventory}, so the tracking hot path does no extra work when the flag
+     * is off and does no MORE than a few field reads when it is on.
+     */
+    private static void logTrackingEvent(String eventType, ServerPlayer player, TameableDragonEntity dragon) {
+        DMR.LOGGER.debug(
+                "[dragon-tracking] {} player={} ({}) dragonUUID={} realUUID={} dimension={} pos={}"
+                        + " gameTime={} distance={}",
+                eventType,
+                player.getGameProfile().getName(),
+                player.getUUID(),
+                dragon.getDragonUUID(),
+                dragon.getUUID(),
+                dragon.level().dimension().location(),
+                dragon.blockPosition(),
+                dragon.level().getGameTime(),
+                player.position().distanceTo(dragon.position()));
     }
 
     public static DragonInventory getOrCreateInventory(TameableDragonEntity dragon) {

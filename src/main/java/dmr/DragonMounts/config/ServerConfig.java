@@ -264,6 +264,23 @@ public class ServerConfig {
             category = "behavior")
     public static boolean DRAGON_TEAM_PASSIVITY = true;
 
+    @Config(
+            key = "log_dragon_tracking_events",
+            comment = {
+                "W8-SYNC-7: diagnostic for the invisible-dragon-until-relog symptom (#43/#111).",
+                "When enabled, logs a DEBUG line every time the server starts or stops tracking a",
+                "dragon for a player (PlayerEvent.StartTracking/StopTracking — vanilla server",
+                "entity-visibility bookkeeping, not a network packet), with enough detail to",
+                "reconstruct the exact add/remove sequence a specific player saw around an incident.",
+                "Does NOT by itself diagnose the symptom: every server-side theory for it has already",
+                "been refuted, and the surviving hypothesis (client-side occlusion-culling mods",
+                "mis-culling the dragon) emits no server-visible signal at all. This diagnostic rules",
+                "OUT a server-side tracking anomaly if the symptom recurs; it cannot confirm one.",
+                "Default OFF — noisy on a busy server with many dragons and players."
+            },
+            category = "debug")
+    public static boolean LOG_DRAGON_TRACKING_EVENTS = false;
+
     // Initialize the config
     static {
         MOD_CONFIG_SPEC = ConfigProcessor.processConfig(ServerConfig.class);

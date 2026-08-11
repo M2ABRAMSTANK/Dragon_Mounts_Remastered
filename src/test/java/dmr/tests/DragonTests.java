@@ -1,13 +1,16 @@
 package dmr.tests;
 
 import dmr.DMRTestConstants;
+import dmr.DragonMounts.config.ServerConfig;
 import dmr.DragonMounts.network.packets.DismountDragonPacket;
 import dmr.DragonMounts.registry.DragonArmorRegistry;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModItems;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
+import dmr.DragonMounts.server.inventory.DragonInventoryHandler;
 import dmr.DragonMounts.server.items.DragonArmorItem;
+import dmr.DragonMounts.server.worlddata.DragonWorldData;
 import dmr.DragonMounts.types.dragonBreeds.DragonBreed;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.lang.reflect.Field;
@@ -20,6 +23,7 @@ import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.GameType;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import net.neoforged.testframework.annotation.ForEachTest;
 import net.neoforged.testframework.annotation.TestHolder;
@@ -853,6 +857,79 @@ public class DragonTests {
 
         if (margin != 5.0) {
             helper.fail("Baby dragon's culling margin was not floored to today's flat +5 — got " + margin);
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SYNC-7 regression: {@code ServerConfig.LOG_DRAGON_TRACKING_EVENTS} must default to
+     * {@code false} — this is a diagnostic, and an always-on tracking-pair log would be
+     * noisy on a busy server with many dragons and players.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void testLogDragonTrackingEventsDefaultsFalse(ExtendedGameTestHelper helper) {
+        if (ServerConfig.LOG_DRAGON_TRACKING_EVENTS) {
+            helper.fail("LOG_DRAGON_TRACKING_EVENTS defaulted to true — this diagnostic must ship OFF by default");
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SYNC-7 regression: the config-gated tracking diagnostic must not break the
+     * existing {@code RequestDragonInventoryPacket}/{@code ClearDragonInventoryPacket} path
+     * — the only regression this change can cause, per the gate's own framing (a log-capture
+     * assertion is unimplementable in this repo — no log appender seam exists here, same
+     * constraint the packet-ordering tests elsewhere in this suite hit). Proxy: with the flag
+     * ON, firing {@code StartTracking} directly against the real handler (1) does not throw,
+     * and (2) still runs the code PAST the new log line — i.e. still lazily creates the
+     * dragon's global inventory entry, exactly as it did before this diagnostic existed.
+     * {@code StopTracking} is fired the same way and likewise must not throw.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void testTrackingDiagnosticDoesNotBreakTrackingPacketPath(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var overworld = player.level.getServer().overworld();
+        var worldData = DragonWorldData.getInstance(overworld);
+
+        // The mock player's real network connection means vanilla chunk-tracking may
+        // already have fired a REAL StartTracking event for this dragon before this test
+        // manually fires its own — force a known "no inventory entry yet" precondition
+        // rather than assuming one, so the postcondition below is unambiguous proof that
+        // THIS manual call (not some earlier natural one) is what created the entry.
+        worldData.dragonInventories.remove(dragon.getDragonUUID());
+
+        boolean previousFlag = ServerConfig.LOG_DRAGON_TRACKING_EVENTS;
+        try {
+            ServerConfig.LOG_DRAGON_TRACKING_EVENTS = true;
+
+            DragonInventoryHandler.startTracking(new PlayerEvent.StartTracking(player, dragon));
+
+            if (!worldData.dragonInventories.containsKey(dragon.getDragonUUID())) {
+                helper.fail("StartTracking with the diagnostic ON did not reach getOrCreateInventory() — the"
+                        + " gated log call broke the existing RequestDragonInventoryPacket path");
+            }
+
+            // No observable server-side state change from ClearDragonInventoryPacket to assert
+            // on (it only clears a CLIENT-side cache) — firing this not throwing is the proof.
+            DragonInventoryHandler.stopTracking(new PlayerEvent.StopTracking(player, dragon));
+        } finally {
+            ServerConfig.LOG_DRAGON_TRACKING_EVENTS = previousFlag;
         }
 
         helper.succeed();
