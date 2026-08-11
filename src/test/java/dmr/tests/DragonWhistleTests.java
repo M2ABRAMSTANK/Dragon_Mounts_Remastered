@@ -1190,6 +1190,138 @@ public class DragonWhistleTests {
     }
 
     /**
+     * Fix-round (commit 16, {@code f2c33cd}) regression: a REFUSED mint must NOT
+     * consume either of {@code DragonWhistleHandler#isConfirmedDead}'s one-shot death-signal stores
+     * ({@code cap.respawnDelays} and the per-level {@code DragonWorldDataManager}
+     * dead-dragon record) — consumption is deferred until {@code addFreshEntity}
+     * actually succeeds, specifically so a refusal leaves the death signal intact for
+     * the player's immediate retry.
+     *
+     * <p>
+     * {@link #respawnRefusedMintRestoresPreMintBindingTriple} cannot cover this: it
+     * makes the original unresolvable via a bare {@code dragon.discard()}, which sends
+     * no death signal at all, so {@code isConfirmedDead} is false for that test and
+     * neither the pre-fix "consume before the mint" call nor the post-fix "consume
+     * after the mint" call is ever reached — the deferral is provably uncovered by it
+     * (see this wave's red-baseline for the empirical proof: reverting only commit
+     * 16's production hunk leaves all 114 gametests green).
+     *
+     * <p>
+     * This test forces {@code isConfirmedDead} to true directly, via the same seams
+     * {@code isConfirmedDead}'s own javadoc names as its two independent stores —
+     * {@code cap.respawnDelays.put(index, 0)} for the capability-side half, and
+     * {@link DragonWorldDataManager#setDragonDead} for the world-data half — rather
+     * than relying on a real vanilla death event, which this test suite avoids for the
+     * same tick-window-fragility reasons {@link #invokeRespawnDragonFromSnapshot}'s
+     * javadoc gives. Both stores are seeded so the test exercises the full
+     * {@code confirmedDead} branch, including the {@code clearWorldDeathRecord} half
+     * that a respawnDelays-only seed would leave untouched (isConfirmedDead short-
+     * circuits true on respawnDelays alone, but the consumption block clears BOTH
+     * stores unconditionally once confirmedDead is true).
+     *
+     * <p>
+     * Refusal is forced the same way {@link #respawnRefusedMintRestoresPreMintBindingTriple}
+     * forces it: a temporary {@code EntityJoinLevelEvent} listener cancels the join of
+     * the clone carrying this slot's dragonUUID.
+     *
+     * <p>
+     * Fails on pre-fix-round HEAD (commit 15 / {@code e3703ce}, i.e. {@code f2c33cd^}):
+     * both stores are consumed unconditionally right after {@code confirmedDead} is
+     * computed, before {@code addFreshEntity} is even attempted, so a refused mint
+     * still leaves {@code respawnDelays} empty and the world-data record cleared.
+     * Passes after the fix: consumption only happens once the mint has actually
+     * joined, so a refusal leaves both stores exactly as seeded.
+     *
+     * <p>
+     * Uses {@link #LARGE_TEMPLATE} for the same reason
+     * {@link #respawnRefusedMintRestoresPreMintBindingTriple} does — see that test's
+     * javadoc.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void refusedMintDoesNotConsumeDeathRecord(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        var centerPos = Vec3.atCenterOf(helper.absolutePos(new BlockPos(80, 2, 80)));
+        player.moveTo(centerPos.x, centerPos.y, centerPos.z);
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(80, 2, 80));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        var dragonUuid = dragon.getDragonUUID();
+
+        // Seed BOTH of isConfirmedDead's independent death-signal stores before the
+        // original is discarded, so respawnDragonFromSnapshot computes confirmedDead
+        // == true for this mint — DragonWhistleHandler.java:692's isConfirmedDead
+        // returns true on respawnDelays.containsKey alone, and DragonWorldDataManager
+        // .setDragonDead seeds the world-data half (DragonWhistleHandler.java:716's
+        // clearWorldDeathRecord half).
+        cap.respawnDelays.put(index, 0);
+        DragonWorldDataManager.setDragonDead(dragon, "test-seeded-death-record");
+
+        if (!cap.respawnDelays.containsKey(index)) {
+            helper.fail("Setup failed: respawnDelays seed did not take");
+            return;
+        }
+        if (!DragonWorldDataManager.isDragonDead(helper.getLevel(), dragonUuid)) {
+            helper.fail("Setup failed: world-data death record seed did not take");
+            return;
+        }
+
+        // Make the ORIGINAL unresolvable so respawnDragonFromSnapshot's own
+        // decideSnapshotRespawn presence gate allows a mint attempt at all — mirrors
+        // {@link #respawnRefusedMintRestoresPreMintBindingTriple}'s setup.
+        dragon.discard();
+
+        Consumer<EntityJoinLevelEvent> cancelMint = event -> {
+            if (event.getEntity() instanceof TameableDragonEntity candidate
+                    && dragonUuid.equals(candidate.getDragonUUID())) {
+                event.setCanceled(true);
+            }
+        };
+
+        NeoForge.EVENT_BUS.addListener(EntityJoinLevelEvent.class, cancelMint);
+        boolean result;
+        try {
+            result = invokeRespawnDragonFromSnapshot(player, cap, index);
+        } finally {
+            NeoForge.EVENT_BUS.unregister(cancelMint);
+        }
+
+        if (result) {
+            helper.fail("respawnDragonFromSnapshot returned true despite the mint's join being cancelled");
+            return;
+        }
+
+        if (!cap.respawnDelays.containsKey(index)) {
+            helper.fail("A refused mint consumed cap.respawnDelays[" + index + "] anyway — a genuine death signal"
+                    + " was permanently destroyed with no dragon minted, so the player's immediate retry will"
+                    + " compute confirmedDead == false and mint an unflagged, reclaim-eligible clone of a dragon"
+                    + " vanilla had already confirmed dead.");
+            return;
+        }
+
+        if (!DragonWorldDataManager.isDragonDead(helper.getLevel(), dragonUuid)) {
+            helper.fail("A refused mint cleared the world-data dead-dragon record for " + dragonUuid + " anyway —"
+                    + " same C5/provenance hazard as the respawnDelays half, via the other one-shot death-signal"
+                    + " store.");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
      * W8-SYNC-4a companion regression: proves the restore in
      * {@link #respawnRefusedMintRestoresPreMintBindingTriple} is not just internally
      * consistent but actually fixes the C5 failure mode it exists to prevent — after a
