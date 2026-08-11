@@ -167,8 +167,24 @@ public class DragonWhistleEvent {
 
                         if (player instanceof ServerPlayer spPlayer) {
                             var nbtData = state.dragonNBTs.get(index);
-                            // Send the player their dragon data
-                            PacketDistributor.sendToPlayer(spPlayer, new DragonNBTSync(index, nbtData));
+
+                            // W8-SYNC-5: DragonNBTSync.handleClient treats an EMPTY tag as an
+                            // explicit "delete your cached snapshot" instruction (see that
+                            // class). A null nbtData here means dragonInstances/dragonNBTs
+                            // have diverged for this index — exactly the corruption
+                            // DragonWhistleHandler#canCall already detects and repairs (wipes
+                            // all three maps, pushes CompleteDataSync, shows
+                            // dmr.dragon_call.nodragon) — so sending nothing here and
+                            // deferring to that existing repair is correct; sending an
+                            // empty-tag "delete" on every join/dimension-change instead
+                            // silently wiped the client's dragonNBTs entry for this index,
+                            // which the summon keybind gates on presence of — making the
+                            // summon key a permanent, feedback-less no-op instead of ever
+                            // reaching canCall's repair.
+                            if (nbtData != null) {
+                                // Send the player their dragon data
+                                PacketDistributor.sendToPlayer(spPlayer, new DragonNBTSync(index, nbtData));
+                            }
                         }
 
                         var dragonWasKilled = DragonWorldDataManager.isDragonDead(event.getLevel(), id);

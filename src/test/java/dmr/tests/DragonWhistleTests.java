@@ -221,6 +221,68 @@ public class DragonWhistleTests {
     }
 
     /**
+     * W8-SYNC-5 regression: proves the corrupted-binding repair contract this
+     * commit's join-path {@code DragonNBTSync} null-guard defers to instead of
+     * papering over. When {@code dragonInstances[index]} is present but
+     * {@code dragonNBTs[index]} is absent for a player — exactly the divergence the
+     * pre-fix join-path send used to mask with a silent empty-tag "delete" packet,
+     * which a real client's {@code KeyInputHandler} interprets as gating the summon
+     * keybind off with NO feedback — {@code DragonWhistleHandler#canCall} must
+     * detect the corruption, wipe all three whistle-state maps for that index, and
+     * return {@code false}.
+     *
+     * <p>
+     * This gametest runs entirely server-side (as {@code canCall}'s own corruption
+     * check does — see its {@code !player.level.isClientSide} guard) and therefore
+     * cannot reproduce the CLIENT-side keybind gate the original bug actually lived
+     * in; there is no client in this dedicated-server-only harness. It instead pins
+     * the repair contract the fix's commit body cross-references: once a request
+     * reaches the server (which it now can, since the join path no longer silently
+     * wipes the client's cached snapshot), canCall repairs the corruption cleanly
+     * rather than leaving it to recur.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void corruptedBindingIsRepairedByCanCallRatherThanSilentlyWiped(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = PlayerStateUtils.getHandler(player);
+        // Manufacture the exact divergence W8-SYNC-5 targets: setDragon/
+        // setDragonToWhistle populates BOTH dragonInstances and dragonNBTs for this
+        // index — remove only the NBT half.
+        cap.dragonNBTs.remove(index);
+
+        if (!cap.dragonInstances.containsKey(index) || cap.dragonNBTs.containsKey(index)) {
+            helper.fail("Setup failed: did not manufacture a dragonInstances-without-dragonNBTs divergence");
+            return;
+        }
+
+        boolean canCall = DragonWhistleHandler.canCall(player, index);
+
+        if (canCall) {
+            helper.fail("canCall returned true for a corrupted (dragonInstances-without-dragonNBTs) binding");
+        }
+
+        if (cap.dragonInstances.containsKey(index)
+                || cap.dragonNBTs.containsKey(index)
+                || cap.respawnDelays.containsKey(index)) {
+            helper.fail("canCall did not clear the corrupted binding's whistle-state maps for index " + index);
+        }
+
+        helper.succeed();
+    }
+
+    /**
      * Tests the DragonWhistleHandler.findDragon method.
      *
      * <p>
