@@ -1048,6 +1048,134 @@ public class PathNavigationTests {
     }
 
     // ---------------------------------------------------------------------------------
+    // W8-PF2 fix-round follow-up (targetPos/this.path desync)
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * FIX-ROUND follow-up to W8-PF2's same-target reuse gate: exercises the specific
+     * {@code targetPos}/{@code this.path} DESYNC the original review missed. {@code
+     * PathNavigation.targetPos} (read via {@code getTargetPos()}) is assigned by EVERY
+     * successful {@code createPath} call — verified against decompiled {@code
+     * PathNavigation}'s 5-arg {@code createPath}: {@code this.targetPos =
+     * path.getTarget();} runs whenever a path with a non-null target is returned — whereas
+     * {@code this.path}, the path actually being followed, is only ever assigned by {@code
+     * moveTo}/{@code recomputePath}. A direct {@code createPath} call that is NOT followed
+     * by {@code moveTo} (exactly like vanilla's own {@code MoveToTargetSink.tryComputePath},
+     * which calls {@code createPath}, checks {@code path.canReach()}, and only calls
+     * {@code moveTo} on the reaching branch) therefore advances {@code targetPos} without
+     * ever touching {@code this.path} — the two fields desync.
+     *
+     * <p>
+     * Sequence: (1) {@code moveTo} establishes a live path to target A — {@code this.path}
+     * and {@code targetPos} both point at A. (2) A direct {@code createPath} call for
+     * target B1, still inside the throttle window, forces {@code targetPos} to advance to
+     * B1 (per the mechanism above) while {@code this.path} keeps routing to A — the desync
+     * is now in place. (3) A further throttled {@code createPath} call for a DIFFERENT
+     * exact block B2 — one block off B1, still within {@code accuracy} of it — is the call
+     * actually under test.
+     *
+     * <p>
+     * <b>Why B2 must be a DIFFERENT exact {@code BlockPos} from B1, not the same one
+     * (DEVIATION from the literal "call createPath(B, accuracy) again" wording — same
+     * spec intent, adapted mechanism):</b> {@code PathNavigation}'s OWN 5-arg {@code
+     * createPath} — inherited unmodified, reached whenever this gate correctly falls
+     * through to compute fresh — carries a SEPARATE, pre-existing reuse guard keyed on
+     * the exact same {@code targetPos} field: {@code this.path != null &&
+     * !this.path.isDone() && targets.contains(this.targetPos)} (decompiled {@code
+     * PathNavigation.java}, verified). If step 3 requested the SAME exact B1 that step 2
+     * advanced {@code targetPos} to, THAT guard would independently match ({@code
+     * targets = {B1}}, {@code targetPos == B1}) and hand back {@code this.path} (still
+     * pathA) itself — reproducing the wrong-destination symptom via a completely
+     * different, pre-existing mechanism this fix-round's required change #3 does not
+     * touch (see this cluster's own review notes, observation (b): the walk-then-fly
+     * double {@code super.createPath} call hits the identical guard family, predates
+     * wave 8, and is explicitly out of scope here — backlog item, not fixed in this
+     * commit). That would make this test fail on FIXED code too, for a reason unrelated
+     * to what this commit changes, and could not discharge the required change at all.
+     * Using a distinct B2 (one block off B1, still within {@code accuracy} of it so the
+     * OLD buggy {@code getTargetPos()}-keyed gate still matches by distance — proving the
+     * desync bug is still demonstrated) keeps {@code targets.contains(this.targetPos)}
+     * false ({@code {B2}.contains(B1)} is false for distinct exact BlockPos, even though
+     * they are geometrically close), so the fixed gate's own fall-through reaches a
+     * genuine fresh computation rather than being masked by the deeper, unrelated guard.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, the same-target reuse gate matched on {@code
+     * getTargetPos() == B1} (within {@code accuracy} of the requested B2, advanced by
+     * step 2), found {@code this.path} live and non-done, and handed back the A-path for
+     * a B2 request — sending the dragon to the WRONG place, a bug {@code
+     * throttledCreatePathToADifferentTargetComputesFreshPath} above cannot catch because
+     * it never performs the intervening direct call that creates the desync in the first
+     * place. Post-fix (gate keyed on {@code this.path.getTarget()}, which is still A
+     * after step 2), the gate correctly does not match B2 and falls through to compute a
+     * genuine fresh path to B2.
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void throttledCreatePathDoesNotServeStaleTargetAfterDirectCreatePathDesync(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(34, 0, 4), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 2));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos targetA = helper.absolutePos(new BlockPos(10, 2, 2));
+        boolean started = navigation.moveTo(targetA.getX(), targetA.getY(), targetA.getZ(), 1, 1.0);
+        Path pathA = navigation.getPath();
+        if (!started || pathA == null || pathA.isDone()) {
+            helper.fail("DIAGNOSTIC setup failed to establish a live path to target A: started=" + started);
+            return;
+        }
+
+        // Still inside the throttle window (moveTo's internal createPath just reset it) —
+        // a DIRECT createPath call for target B1, with no moveTo, which per
+        // PathNavigation's own 5-arg createPath advances targetPos to B1 while leaving
+        // this.path (still pathA) completely untouched. This is what manufactures the
+        // desync under test.
+        BlockPos targetB1 = helper.absolutePos(new BlockPos(32, 2, 2));
+        Path desyncSetupPath = navigation.createPath(targetB1, 2);
+        if (desyncSetupPath == null || !desyncSetupPath.canReach()) {
+            helper.fail("DIAGNOSTIC setup failed to compute a reaching direct path to target B1 needed to"
+                    + " advance targetPos and manufacture the desync");
+            return;
+        }
+
+        // Still inside the throttle window (the direct call above reset it again). This
+        // is the call actually under test — a DIFFERENT exact block (B2, one block off
+        // B1) but within `accuracy` of it, so the OLD buggy getTargetPos()-keyed gate
+        // still matches by distance (the bug this test targets), while the deeper,
+        // unrelated, pre-existing PathNavigation-level targetPos reuse guard (keyed on
+        // exact BlockPos set membership, not distance) does not — see this method's
+        // javadoc for why that distinction is load-bearing here.
+        BlockPos targetB2 = helper.absolutePos(new BlockPos(33, 2, 2));
+        Path result = navigation.createPath(targetB2, 2);
+        if (result == null) {
+            helper.fail("Throttled createPath for target B2 returned null after the desyncing direct call");
+            return;
+        }
+        if (result == pathA) {
+            helper.fail("Throttled createPath for target B2 returned the LIVE PATH TO TARGET A — the"
+                    + " same-target reuse gate matched on the stale targetPos (advanced to B1 by the"
+                    + " intervening direct createPath call) instead of the path actually being followed,"
+                    + " sending the dragon to the wrong place");
+            return;
+        }
+        BlockPos reachedTarget = result.getTarget();
+        if (reachedTarget == null || !reachedTarget.equals(targetB2)) {
+            helper.fail("Throttled createPath for target B2 returned a path targeting " + reachedTarget
+                    + ", not B2 (" + targetB2 + ") — the desync sent the request to the wrong destination");
+        }
+
+        helper.succeed();
+    }
+
+    // ---------------------------------------------------------------------------------
     // W8-PF7a (commit 7)
     // ---------------------------------------------------------------------------------
 

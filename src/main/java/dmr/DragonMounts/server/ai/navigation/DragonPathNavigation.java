@@ -147,8 +147,23 @@ public class DragonPathNavigation extends FlyingPathNavigation {
         // It falls through to the branch below and computes fresh, exactly like a
         // throttled request with no usable cached path at all (first-ever call, or a
         // path just nulled by recomputePath's eager reset / stuck-detection).
+        //
+        // FIX-ROUND: discriminates on `this.path.getTarget()` — the target of the path
+        // actually being returned — rather than `getTargetPos()`. Those are two
+        // different fields and can desync: `PathNavigation.targetPos` is assigned by
+        // EVERY successful 5-arg createPath call (decompiled PathNavigation.java:172,
+        // `this.targetPos = path.getTarget();`), including one whose result is then
+        // REJECTED by the caller (e.g. vanilla's own MoveToTargetSink.tryComputePath
+        // calls createPath, checks path.canReach(), and only calls moveTo — which is
+        // what actually installs `this.path` — on the reaching branch), whereas
+        // `this.path` is only ever assigned by moveTo/recomputePath. Keying the gate on
+        // getTargetPos() could therefore match a request for a target the live `this.path`
+        // does NOT actually route to, handing back a path to the WRONG destination — a
+        // second wrong-destination bug the same shape as the one W8-PF2 fixes. Path's own
+        // getTarget() (decompiled Path.java:172, public, non-null) is the ground truth for
+        // what `this.path` itself targets.
         if (lastPathCreationDelta < TICKS_BETWEEN_PATH_CREATIONS) {
-            BlockPos currentTarget = getTargetPos();
+            BlockPos currentTarget = this.path == null ? null : this.path.getTarget();
             if (this.path != null
                     && !this.path.isDone()
                     && currentTarget != null
