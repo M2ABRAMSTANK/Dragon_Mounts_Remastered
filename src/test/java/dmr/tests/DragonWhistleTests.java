@@ -26,11 +26,14 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
@@ -1531,6 +1534,18 @@ public class DragonWhistleTests {
      * DMR-manufacturable way to end up with two live entities sharing a real UUID
      * server-wide. The existing dragonUUID-based pre-check cannot catch this: the
      * colliding entity here is a plain, unrelated entity with no dragonUUID at all.
+     * <p>
+     * The colliding entity is placed in the NETHER — a DIFFERENT level from the one
+     * the recall mints into (the overworld, via {@code helper.getLevel()}) — so that
+     * vanilla's own per-level {@code PersistentEntitySectionManager} UUID index (which
+     * only guards its own level) cannot be what refuses the join; only DMRCommand's
+     * explicit all-levels {@code candidateLevel.getEntity(id) != null} scan can catch
+     * a collision that lives in a level the mint never touches. Placing the collider
+     * in the same level as the mint (as an earlier draft of this test did) would let
+     * vanilla's own index silently do the refusing instead, leaving the actual
+     * cross-level check uncovered. The test also asserts on the specific collision
+     * failure message, not just a non-zero-refusal return code, so a refusal from the
+     * unrelated join-cancelled/no-history path can't accidentally pass this test.
      * Fails on pre-fix HEAD (the pre-check loop only compares dragonUUID, never the
      * real UUID {@code id} itself is about to be stamped with); passes after the fix.
      *
@@ -1551,41 +1566,104 @@ public class DragonWhistleTests {
         DragonWorldDataManager.addDragonHistory(dragon);
         dragon.discard();
 
-        // A plain, unrelated entity (no dragonUUID at all) already holding the exact
-        // real UUID the recall is about to stamp onto its own mint. Built and
-        // UUID-stamped BEFORE ever touching the level, matching commit 14's own
-        // "no level-side UUID index to desync" precedent.
-        var colliding = EntityType.PIG.create(helper.getLevel());
-        if (colliding == null) {
-            helper.fail("Failed to construct the colliding entity");
-            return;
-        }
-        colliding.setUUID(dragonUuid);
-        var collidingPos = Vec3.atCenterOf(helper.absolutePos(DMRTestConstants.TEST_POS.offset(2, 0, 0)));
-        colliding.setPos(collidingPos.x, collidingPos.y, collidingPos.z);
-        if (!helper.getLevel().addFreshEntity(colliding)) {
-            helper.fail("Setup failed: could not add the colliding entity to the level");
+        ServerLevel netherLevel = helper.getLevel().getServer().getLevel(Level.NETHER);
+        if (netherLevel == null) {
+            helper.fail("Setup failed: the gametest server has no NETHER level loaded");
             return;
         }
 
-        var capture = new CapturingCommandSource();
-        var source = makeCapturingCommandSourceStack(helper, player, capture);
+        // Force the target chunk to actually exist AND become entity-visible before
+        // adding an entity to it directly — unlike the changeDimension path other
+        // tests in this file use, there is no portal plumbing here to do this for us.
+        // getChunk() alone only forces block/data generation up to FULL status; the
+        // entity-visibility promotion that ServerLevel#getEntity(UUID) reads from
+        // (PersistentEntitySectionManager's visibleEntityStorage) is driven by
+        // ChunkMap's distance-manager ticket tracking, not synchronously by getChunk()
+        // itself — a plain getChunk() call with no region ticket registered gets torn
+        // back down (scheduled for unload) the moment the chunk source is next ticked,
+        // so the entity we add afterward never gets promoted. A FORCED ticket at
+        // distance 0 (-> ticket level 33, ChunkLevel.byStatus(FULL)) keeps the chunk at
+        // FullChunkStatus.FULL — Visibility.TRACKED, i.e. accessible via getEntity(...)
+        // — for as long as the ticket is held; a few chunk-source ticks afterward let
+        // the distance manager actually process it and promote the chunk.
+        ChunkPos colliderChunkPos = new ChunkPos(0, 0);
+        netherLevel.getChunkSource().addRegionTicket(TicketType.FORCED, colliderChunkPos, 0, colliderChunkPos);
+        try {
+            netherLevel.getChunk(0, 0);
+            // Registering the ticket only queues a level-change; ChunkMap's actual
+            // promotion to an ACCESSIBLE visibility runs as a completable-future
+            // continuation (ChunkHolder#scheduleFullChunkPromotion) chained onto the
+            // level's own chunk-source main-thread executor. A few #tick() passes let
+            // the distance manager propagate the ticket and schedule that
+            // continuation; draining the executor's task queue afterward via the
+            // PUBLIC #pollTask (the same executor #getChunk's own blocking wait pumps
+            // internally) is what actually RUNS it — synchronously, with no dependency
+            // on a real server tick ever occurring.
+            for (int i = 0; i < 5; i++) {
+                netherLevel.getChunkSource().tick(() -> true, true);
+            }
+            while (netherLevel.getChunkSource().pollTask()) {
+                // Drain until the queue is empty.
+            }
 
-        int result = invokeRunRecall(source, dragonUuid, player.position());
+            // A plain, unrelated entity (no dragonUUID at all) already holding the
+            // exact real UUID the recall is about to stamp onto its own mint — added
+            // to the NETHER, NOT the overworld level the recall mints into, so only
+            // DMRCommand's explicit all-levels real-UUID scan (not vanilla's per-level
+            // UUID index) can refuse this. Built and UUID-stamped BEFORE ever touching
+            // the level, matching commit 14's own "no level-side UUID index to
+            // desync" precedent.
+            var colliding = EntityType.PIG.create(netherLevel);
+            if (colliding == null) {
+                helper.fail("Failed to construct the colliding entity");
+                return;
+            }
+            colliding.setUUID(dragonUuid);
+            colliding.setPos(0, 64, 0);
+            if (!netherLevel.addFreshEntity(colliding)) {
+                helper.fail("Setup failed: could not add the colliding entity to the nether level");
+                return;
+            }
 
-        if (result != 0) {
-            helper.fail("runRecall did not refuse a real-UUID collision with an unrelated (non-dragon, no"
-                    + " dragonUUID) entity already holding that UUID (returned " + result + ")");
-            return;
+            if (netherLevel.getEntity(dragonUuid) == null) {
+                helper.fail("Setup failed: the colliding entity was added to the nether but is not visible via"
+                        + " getEntity(uuid) there — the forced chunk ticket did not promote it in time");
+                return;
+            }
+
+            var capture = new CapturingCommandSource();
+            var source = makeCapturingCommandSourceStack(helper, player, capture);
+
+            int result = invokeRunRecall(source, dragonUuid, player.position());
+
+            if (result != 0) {
+                helper.fail("runRecall did not refuse a real-UUID collision with an unrelated (non-dragon, no"
+                        + " dragonUUID) entity already holding that UUID in a DIFFERENT level (returned " + result
+                        + ")");
+                return;
+            }
+
+            var minted = helper.getLevel()
+                    .getEntities(ModEntities.DRAGON_ENTITY.get(), d -> dragonUuid.equals(d.getDragonUUID()));
+            if (!minted.isEmpty()) {
+                helper.fail("runRecall minted a dragon despite the real-UUID collision refusal");
+                return;
+            }
+
+            boolean sawCollisionMessage = capture.messages.stream()
+                    .map(Component::getString)
+                    .anyMatch(msg -> msg.contains("refusing to recall a colliding real UUID"));
+            if (!sawCollisionMessage) {
+                helper.fail(
+                        "runRecall refused, but not via the cross-level real-UUID collision check — expected a"
+                                + " message containing \"refusing to recall a colliding real UUID\", got: "
+                                + capture.messages);
+                return;
+            }
+
+            helper.succeed();
+        } finally {
+            netherLevel.getChunkSource().removeRegionTicket(TicketType.FORCED, colliderChunkPos, 0, colliderChunkPos);
         }
-
-        var minted = helper.getLevel()
-                .getEntities(ModEntities.DRAGON_ENTITY.get(), d -> dragonUuid.equals(d.getDragonUUID()));
-        if (!minted.isEmpty()) {
-            helper.fail("runRecall minted a dragon despite the real-UUID collision refusal");
-            return;
-        }
-
-        helper.succeed();
     }
 }
