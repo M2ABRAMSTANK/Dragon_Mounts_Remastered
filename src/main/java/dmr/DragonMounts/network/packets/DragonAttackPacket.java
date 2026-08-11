@@ -2,6 +2,7 @@ package dmr.DragonMounts.network.packets;
 
 import dmr.DragonMounts.network.AbstractMessage;
 import dmr.DragonMounts.registry.ModCriterionTriggers;
+import dmr.DragonMounts.server.ai.teams.DragonAllyService;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import lombok.Getter;
 import net.minecraft.network.FriendlyByteBuf;
@@ -76,9 +77,20 @@ public class DragonAttackPacket extends AbstractMessage<DragonAttackPacket> {
 
             var offsetAabb = dragon.getBoundingBox().move(lookVector).inflate(2, 5, 2);
 
+            // W8-TEAMS-3/T3-S6: C1 — wire shape untouched (still a single INT field);
+            // only this server-side auto-target selector changes, so .2/.3 clients are
+            // unaffected (C6). Uses DragonAllyService.isAllied (pet-normalizing, so a
+            // teammate's tamed dragon standing in the swing arc is skipped too) rather
+            // than raw isAlliedTo; for non-teamed/vanilla-teamed `s` this is byte-
+            // identical to the replaced expression (C4). A single `.selector(...)` call
+            // is used deliberately — TargetingConditions#selector REPLACES rather than
+            // composes (decompiled sources), so an earlier `player::canAttack` selector
+            // here was dead code, silently discarded by this second call; it is dropped
+            // rather than kept as a misleading no-op, since TargetingConditions#test
+            // already applies `attacker.canAttack(target)` internally.
             var entities = dragon.level.getNearbyEntities(
                     LivingEntity.class,
-                    TargetingConditions.forCombat().selector(player::canAttack).selector(s -> !s.isAlliedTo(player)),
+                    TargetingConditions.forCombat().selector(s -> !DragonAllyService.isAllied(s, player)),
                     player,
                     offsetAabb);
             var target = entities.stream()

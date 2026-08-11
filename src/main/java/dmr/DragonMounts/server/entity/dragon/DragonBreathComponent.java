@@ -2,6 +2,7 @@ package dmr.DragonMounts.server.entity.dragon;
 
 import dmr.DragonMounts.client.particle.particleoptions.DragonBreathParticleOptions;
 import dmr.DragonMounts.network.packets.DragonBreathTargetSyncPacket;
+import dmr.DragonMounts.server.ai.teams.DragonAllyService;
 import dmr.DragonMounts.types.breath.DragonBreathType;
 import lombok.Getter;
 import lombok.Setter;
@@ -255,9 +256,24 @@ abstract class DragonBreathComponent extends DragonAnimationComponent {
 
     /**
      * Checks if the dragon can harm the target with its breath.
+     *
+     * <p>
+     * W8-TEAMS-3/T3-S5: the offline/cross-dimension-owner guard is a SEPARATE leading
+     * check, not folded into the {@code getOwner() == null} clause below — that clause
+     * short-circuits {@code true} (harm allowed) unconditionally whenever the owner isn't
+     * in the dragon's own level ({@code DragonOwnershipComponent#getOwner} only scans
+     * same-level players), which is exactly when an unattended dragon is most likely to
+     * roast a teammate wandering past. {@code DragonAllyService.isTeammateOfOwner}
+     * resolves the owner by UUID for this path, so it works even though {@code
+     * getOwner()} itself returns {@code null} here. The {@code isTame()} guard keeps a
+     * WILD dragon's breath (which also has {@code getOwner() == null}) completely
+     * unaffected.
      */
     public boolean canHarmWithBreath(LivingEntity target) {
+        if (getDragon().isTame() && DragonAllyService.isTeammateOfOwner(getDragon(), target)) {
+            return false;
+        }
         return getOwner() == null
-                || target != getOwner() && getOwner().canAttack(target) && !target.isAlliedTo(getOwner());
+                || target != getOwner() && getOwner().canAttack(target) && !DragonAllyService.isAllied(target, getOwner());
     }
 }

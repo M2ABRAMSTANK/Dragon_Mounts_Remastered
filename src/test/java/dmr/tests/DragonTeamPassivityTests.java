@@ -2,6 +2,7 @@ package dmr.tests;
 
 import dmr.DMRTestConstants;
 import dmr.DragonMounts.config.ServerConfig;
+import dmr.DragonMounts.network.packets.DragonAttackPacket;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.server.ai.teams.DragonAllyService;
@@ -11,7 +12,14 @@ import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+import net.minecraft.world.entity.monster.Zombie;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.GameType;
+import net.minecraft.world.scores.PlayerTeam;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import net.neoforged.testframework.annotation.ForEachTest;
 import net.neoforged.testframework.annotation.TestHolder;
@@ -583,6 +591,418 @@ public class DragonTeamPassivityTests {
             if (!released) {
                 helper.fail("Dragon kept an in-progress attack target after that target became a teammate"
                         + " mid-fight — the FIGHT activity's release path did not fire");
+                return;
+            }
+        } finally {
+            DragonAllyService.setProvidersForTest(previousProviders);
+            ServerConfig.DRAGON_TEAM_PASSIVITY = previousPassivity;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * {@code W8-TEAMS-3}/{@code T3-S2} (re-specified per {@code gate-design-teams.json},
+     * rejecting the original two-{@code TargetingConditions}-evaluation design): THE
+     * regression test the gate demanded. The legacy owner-assist override's own trigger
+     * (<code>!isNotAllied</code>) fires on ANY {@code TargetingConditions} failure — not
+     * only allegiance — and {@code DragonCombatComponent#canAttack} returns {@code false}
+     * whenever the owner is RIDING the dragon (a controlling passenger). Without {@code
+     * modOnlyAlly} gating the override, a dragon carrying its riding owner would still
+     * pile onto an FTB/OPAC teammate the owner last hit — exactly the operator's primary
+     * scenario ("owner accidentally clips their teammate while flying"). Uses a stub
+     * {@link TeamProvider} on players with NO vanilla team (a vanilla team would make
+     * this vacuous even on unmodified HEAD, since a tamed dragon inherits the owner's
+     * team).
+     *
+     * <p>
+     * Asserts against the {@code NEAREST_ATTACKABLE} brain memory {@code
+     * isMatchingEntity} actually writes, NOT {@code dragon.getTarget()}: {@code
+     * StartAttacking} (the behavior that would convert {@code NEAREST_ATTACKABLE} into a
+     * real {@code ATTACK_TARGET}) independently refuses to run whenever {@code
+     * dragon.canAttack(target)} is false (decompiled sources), which is UNCONDITIONALLY
+     * true while the owner is riding ({@code DragonCombatComponent#canAttack}) — so
+     * {@code getTarget()} would read {@code null} here regardless of whether the sensor's
+     * own teammate gate is working at all, making a {@code getTarget()}-based assertion
+     * vacuous by construction for every ridden-dragon test in this file. Confirmed via
+     * live diagnostic instrumentation before this fix: {@code NEAREST_ATTACKABLE} really
+     * was already being populated correctly while {@code getTarget()} stayed {@code null}
+     * throughout.
+     */
+    @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
+    @GameTest
+    @TestHolder
+    public static void sensorOverrideRefusesFtbTeammateWhileOwnerIsRiding(ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var owner = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        owner.moveTo(dragon.getX(), dragon.getY(), dragon.getZ());
+        var teammate = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        teammate.moveTo(dragon.getX() + 3, dragon.getY(), dragon.getZ());
+
+        dragon.tamedFor(owner, true);
+
+        // Mount: saddle + interact twice (proven pattern, see DragonTests#rideDragon).
+        owner.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SADDLE));
+        dragon.interact(owner, InteractionHand.MAIN_HAND);
+        owner.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        dragon.interact(owner, InteractionHand.MAIN_HAND);
+        if (!owner.isPassenger()) {
+            helper.fail("Precondition failed: owner did not mount the dragon");
+            return;
+        }
+
+        var previousProviders = DragonAllyService.providers;
+        boolean previousPassivity = ServerConfig.DRAGON_TEAM_PASSIVITY;
+        try {
+            DragonAllyService.setProvidersForTest(List.of(stubTeammatesOf(owner.getUUID(), teammate.getUUID())));
+            ServerConfig.DRAGON_TEAM_PASSIVITY = true;
+
+            owner.setLastHurtMob(teammate);
+
+            for (int i = 0; i < 60; i++) {
+                owner.tick();
+                teammate.tick();
+                dragon.tick();
+                var nearestAttackable = dragon.getBrain().getMemory(MemoryModuleType.NEAREST_ATTACKABLE);
+                if (nearestAttackable.isPresent() && nearestAttackable.get() == teammate) {
+                    helper.fail("Owner-assist override acquired an FTB teammate into NEAREST_ATTACKABLE while the"
+                            + " owner was riding the dragon (tick " + i + ") — the exact operator scenario this fix"
+                            + " targets");
+                    return;
+                }
+            }
+        } finally {
+            DragonAllyService.setProvidersForTest(previousProviders);
+            ServerConfig.DRAGON_TEAM_PASSIVITY = previousPassivity;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Positive control for {@link #sensorOverrideRefusesFtbTeammateWhileOwnerIsRiding}:
+     * with the SAME riding setup, the override must still fire normally for a genuine
+     * (non-teamed) target the owner last hit — proving {@code modOnlyAlly} narrowly
+     * targets teammates rather than breaking the ridden owner-assist override generally.
+     * See that test's javadoc for why this asserts against {@code NEAREST_ATTACKABLE}
+     * rather than {@code dragon.getTarget()}.
+     */
+    @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
+    @GameTest
+    @TestHolder
+    public static void sensorOverrideStillFiresWhileRidingForNonTeammate(ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var owner = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        owner.moveTo(dragon.getX(), dragon.getY(), dragon.getZ());
+        var stranger = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        stranger.moveTo(dragon.getX() + 3, dragon.getY(), dragon.getZ());
+
+        dragon.tamedFor(owner, true);
+
+        owner.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SADDLE));
+        dragon.interact(owner, InteractionHand.MAIN_HAND);
+        owner.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        dragon.interact(owner, InteractionHand.MAIN_HAND);
+        if (!owner.isPassenger()) {
+            helper.fail("Precondition failed: owner did not mount the dragon");
+            return;
+        }
+
+        var previousProviders = DragonAllyService.providers;
+        boolean previousPassivity = ServerConfig.DRAGON_TEAM_PASSIVITY;
+        try {
+            DragonAllyService.setProvidersForTest(List.of());
+            ServerConfig.DRAGON_TEAM_PASSIVITY = true;
+
+            owner.setLastHurtMob(stranger);
+
+            boolean piledOn = false;
+            for (int i = 0; i < 60; i++) {
+                owner.tick();
+                stranger.tick();
+                dragon.tick();
+                var nearestAttackable = dragon.getBrain().getMemory(MemoryModuleType.NEAREST_ATTACKABLE);
+                if (nearestAttackable.isPresent() && nearestAttackable.get() == stranger) {
+                    piledOn = true;
+                    break;
+                }
+            }
+            if (!piledOn) {
+                helper.fail("Owner-assist override never put a genuine (non-teamed) target into NEAREST_ATTACKABLE"
+                        + " while riding — the teammate gate is over-broadly suppressing the ridden override"
+                        + " entirely");
+                return;
+            }
+        } finally {
+            DragonAllyService.setProvidersForTest(previousProviders);
+            ServerConfig.DRAGON_TEAM_PASSIVITY = previousPassivity;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Regression guard: the byte-preserved LEGACY branch (vanilla-scoreboard-team ally,
+     * NOT riding) must still fire exactly as before this wave — proves T3-S2 didn't
+     * accidentally remove or narrow the existing override behavior. Unlike every other
+     * "teammate is spared" test in this file, a REAL vanilla {@link PlayerTeam} is the
+     * correct fixture here (not a stub), because this specifically tests the untouched
+     * legacy path, not the new FTB/OPAC one.
+     */
+    @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
+    @GameTest
+    @TestHolder
+    public static void sensorOverrideStillFiresForVanillaTeamAlly(ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var owner = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        owner.moveTo(dragon.getX() + 3, dragon.getY(), dragon.getZ());
+        var vanillaAlly = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        vanillaAlly.moveTo(dragon.getX() + 3, dragon.getY(), dragon.getZ() + 3);
+
+        dragon.tamedFor(owner, true);
+
+        var scoreboard = helper.getLevel().getServer().getScoreboard();
+        PlayerTeam team = scoreboard.addPlayerTeam("dmrTeamPassivityLegacy" + UUID.randomUUID().toString().substring(0, 8));
+        try {
+            scoreboard.addPlayerToTeam(owner.getScoreboardName(), team);
+            scoreboard.addPlayerToTeam(vanillaAlly.getScoreboardName(), team);
+
+            owner.setLastHurtMob(vanillaAlly);
+
+            boolean piledOn = false;
+            for (int i = 0; i < 60; i++) {
+                owner.tick();
+                vanillaAlly.tick();
+                dragon.tick();
+                if (dragon.getTarget() == vanillaAlly) {
+                    piledOn = true;
+                    break;
+                }
+            }
+            if (!piledOn) {
+                helper.fail("Owner-assist override no longer fires for a vanilla-scoreboard-team ally — the"
+                        + " byte-preserved legacy branch regressed");
+                return;
+            }
+        } finally {
+            scoreboard.removePlayerTeam(team);
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * {@code W8-TEAMS-3}/{@code T3-S5}: {@code canHarmWithBreath} directly (rather than
+     * driving the full multi-tick breath-attack AOE sweep, which depends on breed breath-
+     * type configuration and timing unrelated to the ally gate under test) — spares a
+     * teammate and still harms a genuine bystander, proving the gate is narrowly scoped.
+     */
+    @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
+    @GameTest
+    @TestHolder
+    public static void breathSparesTeammateButHarmsNonTeammateBystander(ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var owner = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        owner.moveTo(dragon.getX() + 3, dragon.getY(), dragon.getZ());
+        var teammate = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        teammate.moveTo(dragon.getX() + 3, dragon.getY(), dragon.getZ() + 3);
+        var bystander = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        bystander.moveTo(dragon.getX(), dragon.getY(), dragon.getZ() + 3);
+
+        dragon.tamedFor(owner, true);
+
+        var previousProviders = DragonAllyService.providers;
+        boolean previousPassivity = ServerConfig.DRAGON_TEAM_PASSIVITY;
+        try {
+            DragonAllyService.setProvidersForTest(List.of(stubTeammatesOf(owner.getUUID(), teammate.getUUID())));
+            ServerConfig.DRAGON_TEAM_PASSIVITY = true;
+
+            if (dragon.canHarmWithBreath(teammate)) {
+                helper.fail("canHarmWithBreath allowed harming a teammate of the owner");
+                return;
+            }
+            if (!dragon.canHarmWithBreath(bystander)) {
+                helper.fail("canHarmWithBreath refused a genuine (non-teamed) bystander — the teammate gate is"
+                        + " over-broadly suppressing breath damage entirely");
+                return;
+            }
+        } finally {
+            DragonAllyService.setProvidersForTest(previousProviders);
+            ServerConfig.DRAGON_TEAM_PASSIVITY = previousPassivity;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * {@code W8-TEAMS-3}/{@code T3-S5} required change: the breath gate must also hold
+     * when {@code getOwner()} is {@code null} (offline/cross-dimension owner) — the
+     * pre-fix first clause (<code>getOwner() == null || ...</code>) returned {@code true}
+     * UNCONDITIONALLY in that case, meaning an unattended dragon would roast a teammate
+     * wandering past. Simulates an offline owner by taming the dragon to a UUID with no
+     * matching {@code Player} in the level at all (so {@code getOwner()} — which only
+     * scans {@code dragon.level().players()} — is guaranteed {@code null}).
+     */
+    @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
+    @GameTest
+    @TestHolder
+    public static void breathSparesTeammateEvenWithOfflineOwner(ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        UUID offlineOwnerUuid = UUID.randomUUID();
+        dragon.setOwnerUUID(offlineOwnerUuid);
+        dragon.setTame(true, true);
+
+        var teammate = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        teammate.moveTo(dragon.getX() + 3, dragon.getY(), dragon.getZ());
+
+        if (dragon.getOwner() != null) {
+            helper.fail("Precondition failed: dragon#getOwner() resolved a player for a UUID with no matching"
+                    + " player in the level — cannot exercise the offline-owner path");
+            return;
+        }
+
+        var previousProviders = DragonAllyService.providers;
+        boolean previousPassivity = ServerConfig.DRAGON_TEAM_PASSIVITY;
+        try {
+            DragonAllyService.setProvidersForTest(List.of(stubTeammatesOf(offlineOwnerUuid, teammate.getUUID())));
+            ServerConfig.DRAGON_TEAM_PASSIVITY = true;
+
+            if (dragon.canHarmWithBreath(teammate)) {
+                helper.fail("canHarmWithBreath allowed harming a teammate of an OFFLINE owner — the"
+                        + " getOwner()==null first clause is still short-circuiting true unconditionally");
+                return;
+            }
+        } finally {
+            DragonAllyService.setProvidersForTest(previousProviders);
+            ServerConfig.DRAGON_TEAM_PASSIVITY = previousPassivity;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * {@code W8-TEAMS-3}/{@code T3-S6}: riding the dragon and swinging (via {@link
+     * DragonAttackPacket}) at a group including a teammate must skip past them to a real
+     * target. C1: only the server-side handler logic changes, the packet's wire shape
+     * (single INT field) is untouched, so this is automatically correct for .2/.3 clients
+     * (C6) — this test exercises the handler directly, {@code handle(null, player)},
+     * matching {@code NetworkTests}' precedent that {@code DragonAttackPacket#handle}
+     * never dereferences its {@code IPayloadContext} argument.
+     *
+     * <p>
+     * The "real target" is a vanilla {@link Zombie}, not another {@code GameTestPlayer}:
+     * the NeoForge test framework's mock players silently no-op incoming damage (a real
+     * finding while building this test — {@code LivingEntity#hurt}'s {@code
+     * CommonHooks.onEntityIncomingDamage} gate returns {@code false} for them even with a
+     * nonzero attack-damage attribute, correct owner/target geometry, and no invulnerability
+     * flag set on either the entity or its abilities), so a {@code Player} "real target"
+     * would make this test vacuous regardless of whether the fix under test works.
+     */
+    @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
+    @GameTest
+    @TestHolder
+    public static void riddenMeleeSwingSkipsTeammateAndHitsRealTarget(ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var owner = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        owner.moveTo(dragon.getX(), dragon.getY(), dragon.getZ());
+        owner.yBodyRot = 0f;
+        var teammate = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        teammate.moveTo(dragon.getX(), dragon.getY(), dragon.getZ() + 5);
+        var realTarget = helper.spawn(EntityType.ZOMBIE, DMRTestConstants.TEST_POS);
+        realTarget.moveTo(dragon.getX(), dragon.getY(), dragon.getZ() + 6);
+
+        dragon.tamedFor(owner, true);
+
+        owner.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SADDLE));
+        dragon.interact(owner, InteractionHand.MAIN_HAND);
+        owner.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        dragon.interact(owner, InteractionHand.MAIN_HAND);
+        if (!owner.isPassenger()) {
+            helper.fail("Precondition failed: owner did not mount the dragon");
+            return;
+        }
+        owner.yBodyRot = 0f;
+
+        float realTargetHealthBefore = realTarget.getHealth();
+
+        var previousProviders = DragonAllyService.providers;
+        boolean previousPassivity = ServerConfig.DRAGON_TEAM_PASSIVITY;
+        try {
+            DragonAllyService.setProvidersForTest(List.of(stubTeammatesOf(owner.getUUID(), teammate.getUUID())));
+            ServerConfig.DRAGON_TEAM_PASSIVITY = true;
+
+            new DragonAttackPacket(dragon.getId()).handle(null, owner);
+
+            if (teammate.getHealth() < teammate.getMaxHealth()) {
+                helper.fail("Ridden melee swing damaged a teammate standing in the swing arc");
+                return;
+            }
+            if (realTarget.getHealth() >= realTargetHealthBefore) {
+                helper.fail("Ridden melee swing did not damage the real (non-teamed) target — the swing whiffed"
+                        + " entirely or the teammate skip is over-broadly suppressing it");
+                return;
+            }
+        } finally {
+            DragonAllyService.setProvidersForTest(previousProviders);
+            ServerConfig.DRAGON_TEAM_PASSIVITY = previousPassivity;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * {@code W8-TEAMS-3}/{@code T3-S6} edge case: with ONLY a teammate in the swing arc
+     * (no real target), the swing must whiff harmlessly — {@code target} resolves to
+     * {@code null}, {@code doHurtTarget} is never called, and no exception is thrown
+     * (verifies the null-target early-return path).
+     */
+    @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
+    @GameTest
+    @TestHolder
+    public static void riddenMeleeSwingWhiffsWhenOnlyTeammateInArc(ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var owner = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        owner.moveTo(dragon.getX(), dragon.getY(), dragon.getZ());
+        owner.yBodyRot = 0f;
+        var teammate = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        teammate.moveTo(dragon.getX(), dragon.getY(), dragon.getZ() + 5);
+
+        dragon.tamedFor(owner, true);
+
+        owner.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SADDLE));
+        dragon.interact(owner, InteractionHand.MAIN_HAND);
+        owner.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        dragon.interact(owner, InteractionHand.MAIN_HAND);
+        if (!owner.isPassenger()) {
+            helper.fail("Precondition failed: owner did not mount the dragon");
+            return;
+        }
+        owner.yBodyRot = 0f;
+
+        var previousProviders = DragonAllyService.providers;
+        boolean previousPassivity = ServerConfig.DRAGON_TEAM_PASSIVITY;
+        try {
+            DragonAllyService.setProvidersForTest(List.of(stubTeammatesOf(owner.getUUID(), teammate.getUUID())));
+            ServerConfig.DRAGON_TEAM_PASSIVITY = true;
+
+            new DragonAttackPacket(dragon.getId()).handle(null, owner);
+
+            if (teammate.getHealth() < teammate.getMaxHealth()) {
+                helper.fail("Ridden melee swing damaged the only entity in arc, a teammate");
                 return;
             }
         } finally {
