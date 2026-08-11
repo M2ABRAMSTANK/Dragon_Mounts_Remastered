@@ -212,4 +212,51 @@ public class DragonNodeEvaluator extends FlyNodeEvaluator {
             return walkNodeEvaluator.getPathType(context, x, y, z);
         }
     }
+
+    // W8-PF8: cure the 3x3x3 box-sampling root cause for this wide flying dragon,
+    // rather than relaxing the LEAVES malus table (the original design's approach,
+    // rejected by the gate: a mob-level malus override applies to canStartAt and to the
+    // WALK evaluator too, so it would also route a WALKING dragon through solid leaf
+    // blocks — leaves ARE full-collision cubes in 1.21.1, unlike the parked FENCE case).
+    //
+    // NodeEvaluator.prepare sets entityWidth=entityHeight=entityDepth=Mth.floor(2.75+1)
+    // = 3 for this dragon (see WalkNodeEvaluator.getPathTypeWithinMobBB), so
+    // WalkNodeEvaluator.getPathTypeOfMob (inherited unmodified here via
+    // FlyNodeEvaluator, which does not override it) rejects a node OUTRIGHT — malus
+    // -1.0F, BLOCKED — the moment its 3x3x3 sampling box merely brushes a leaf block
+    // anywhere, even when the node's own centre is open air with a clear leaf-free
+    // flight line straight through it. That is the literal cause of "no path found at
+    // all" near forest canopy this fix targets. Vanilla already has the right
+    // refinement for this shape of problem — getPathTypeOfMob's own small-mob tail
+    // (`entityWidth <= 1 && ... getPathType(...) == OPEN ? OPEN : pathtype`) — but
+    // explicitly excludes any mob wider than 1 block. This override extends that same
+    // reclassification to the wide flying dragon, scoped to LEAVES only.
+    //
+    // Scoping: this override lives on DragonNodeEvaluator itself (which IS-A
+    // FlyNodeEvaluator), so it is only reachable through `this.getPathTypeOfMob(...)`
+    // calls made by the inherited FlyNodeEvaluator/WalkNodeEvaluator machinery — i.e.
+    // the FLY evaluator path (findAcceptedNode/getCachedPathType when allowFlying is
+    // true, via super.findAcceptedNode/super.getPathType above). walkNodeEvaluator is a
+    // wholly separate NodeEvaluator instance whose own getPathTypeOfMob is never
+    // overridden, so a walking dragon is completely unaffected. canStartAt's walk-mode
+    // fallback (neither allowFlying nor allowSwimming) does call this override via its
+    // own inherited getCachedPathType, but is provably unaffected: its formula
+    // `pathtype != OPEN && malus(pathtype) >= 0` evaluates to false either way for a
+    // node this override touches (pre-fix pathtype=LEAVES gives a false via the second
+    // clause since LEAVES' malus stays untouched and negative; post-fix pathtype=OPEN
+    // gives false via the first clause) — see W8-PF8's commit body for the full
+    // derivation. getPathfindingMalus itself is deliberately untouched.
+    //
+    // A node whose OWN centre IS a leaf block is untouched by this override (the
+    // `this.getPathType(context, x, y, z)` guard below only fires when the centre
+    // itself is OPEN) and keeps LEAVES' default negative malus — BLOCKED — so the
+    // dragon is never routed through solid canopy interior, only past its edges.
+    @Override
+    public PathType getPathTypeOfMob(PathfindingContext context, int x, int y, int z, Mob mob) {
+        PathType pathtype = super.getPathTypeOfMob(context, x, y, z, mob);
+        if (pathtype == PathType.LEAVES && this.getPathType(context, x, y, z) == PathType.OPEN) {
+            return PathType.OPEN;
+        }
+        return pathtype;
+    }
 }

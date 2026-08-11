@@ -412,4 +412,203 @@ public class PathNavigationTests {
 
         helper.succeed();
     }
+
+    // ---------------------------------------------------------------------------------
+    // W8-PF8 (commit 4)
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * W8-PF8. Builds a leaf "ceiling" spanning the ENTIRE room footprint at y=3, with the
+     * dragon flying at y=2 — one block of open-air buffer (y=1) below the flight layer,
+     * and the ceiling directly above it. {@code entityHeight = 3} sampling (extends from
+     * a node's own y coordinate upward) means EVERY node at y=2 has its box reach the
+     * ceiling at y=3 — the defect is uniform across the whole room, so there is no
+     * detour that avoids it; this is the "no path found at all near forest canopy"
+     * failure mode the fix targets, in its purest form.
+     *
+     * <p>
+     * <b>Why the flight layer is y=2, not y=1 (directly above the floor):</b> {@code
+     * FlyNodeEvaluator.getPathType}'s single-cell classification special-cases the block
+     * directly below an open-air cell — when that block is solid (as the floor is), the
+     * cell above it classifies as {@code WALKABLE}, not {@code OPEN}, even under flight
+     * rules. The fix's guard is deliberately scoped to {@code getPathType(...) == OPEN}
+     * (matching vanilla's own small-mob refinement exactly, which has the identical
+     * scoping) — a {@code WALKABLE} floor-adjacent cell is out of scope for this fix by
+     * design, the same as it is for vanilla's own refinement. An earlier revision of
+     * this test placed the dragon directly on the floor at y=1 and could not be made to
+     * pass even WITH the fix applied for exactly this reason (confirmed via a temporary
+     * debug trace of {@code getPathTypeOfMob}'s inputs/outputs) — genuinely open, mid-air
+     * canopy nodes are exactly what this fix targets; canopy directly over solid ground
+     * is a different (unfixed, vanilla-inherited) scenario.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, {@code WalkNodeEvaluator.getPathTypeOfMob}
+     * (inherited unmodified via {@code FlyNodeEvaluator}, which does not override it)
+     * returns {@code LEAVES} — malus {@code -1.0F}, {@code BLOCKED} — for every y=2 node
+     * the instant its sampling box touches the ceiling above, even though every node's
+     * own centre is open air with a completely clear flight line straight through it
+     * (the corridor is never physically obstructed — only the box-sampling
+     * classification is wrong). See {@code .fork-notes/wave8/red-baseline.md} for the
+     * exact pre-fix failure recorded for this test.
+     */
+    @EmptyTemplate(SMALL_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void flightPathThroughLeafCanopyIsReachable(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(14, 0, 14), Blocks.STONE.defaultBlockState());
+        // 1-block-thick leaf ceiling spanning the entire room footprint at y=3, with a
+        // 1-block open-air buffer (y=1) between the floor and the y=2 flight layer.
+        buildLeafCanopy(helper, new BlockPos(0, 3, 0), new BlockPos(14, 3, 14));
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 2));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos target = helper.absolutePos(new BlockPos(12, 2, 12));
+        Path path = navigation.createPath(target, 0);
+
+        if (path == null || !path.canReach()) {
+            StringBuilder nodes = new StringBuilder();
+            if (path != null) {
+                for (int i = 0; i < path.getNodeCount(); i++) {
+                    nodes.append(path.getNodePos(i)).append(' ');
+                }
+            }
+            helper.fail("DIAGNOSTIC flight path through leaf canopy did not reach: path="
+                    + (path == null ? "null" : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount() + " nodes=" + nodes))
+                    + " target=" + target);
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-PF8, second half of the fix's contract. A single, isolated leaf block sits
+     * exactly on the straight line between spawn and target, sealed into a 5-wide
+     * (z=5-9) trench — floor-to-ceiling solid side walls at z<=4 and z>=10, a solid
+     * stone floor at y=0, and a solid stone ceiling at y=5 (well above the y=2 flight
+     * layer — see below for why it cannot sit directly above it) — so there is no
+     * sideways OR vertical detour around the block; the ONLY viable path is directly
+     * through the trench.
+     *
+     * <p>
+     * <b>Why the trench, and why the ceiling sits at y=5 (THREE earlier revisions were
+     * each wrong in a different way):</b> a first version of this test placed the same
+     * isolated leaf block in the open 15-wide room used by {@link
+     * #flightPathThroughLeafCanopyIsReachable}, with no side walls at all — it passed on
+     * UNMODIFIED HEAD (confirmed via the actual revert/rerun red-proof cycle, not
+     * assumed), because plenty of z-detour room existed around the small leaf-block
+     * halo. A second version added the side walls described above but no ceiling — it
+     * ALSO passed on unmodified HEAD: the z=5-9 walls do close off every sideways
+     * detour (every wall-safe column z0 ∈ {5,6,7} also falls inside the leaf's 3-wide
+     * sampling halo, since {@code entityDepth=3} means a box at z0 as low as 5 still
+     * reaches z=7), but the trench interior was left open ABOVE the flight layer — the
+     * leaf block only occupies y=2, so a node at y0=3 (box y-range [3,4,5]) never
+     * touches it at all, and the dragon simply flew up one layer, over the obstacle, and
+     * back down. A third version added a ceiling, but placed it at y=3, directly inside
+     * the flight layer's OWN sampling box ({@code entityHeight=3} means a y0=2 node's box
+     * already reaches y=4) — that version failed even WITH the fix applied (confirmed
+     * empirically, nodeCount=1): every y=2 node now touched genuine solid stone, not a
+     * leaf, so the fix's LEAVES-only guard never applied at all, and the whole flight
+     * layer became permanently unreachable regardless of the fix. All three would have
+     * shipped as broken or vacuous — either always green (catching nothing) or always
+     * red (a self-inflicted false failure) — exactly the discipline this wave's whole
+     * harness exists to enforce (see {@code .fork-notes/wave8/red-baseline.md}). The
+     * final geometry needs a taller room than the class's default {@link #SMALL_TEMPLATE}
+     * provides, hence {@link #LARGE_TEMPLATE}: a y=5 ceiling is clear of y0=2's own box
+     * ([2,3,4]) — leaving the leaf fix free to work exactly as in the untouched trench —
+     * while still blocking y0=3's box ([3,4,5], reaches y=5) and y0=4's ([4,5,6]), so the
+     * vertical escape is closed without corrupting the layer under test.
+     *
+     * <p>
+     * <b>DEVIATION FROM THE ORIGINAL DESIGN:</b> the original design's
+     * {@code openRouteIsPreferredOverLeafRoute} asked for two equal-length routes and an
+     * assertion that the computed path contains no {@code LEAVES}-classified node,
+     * framed as a cost-preference regression guard (guarding against the LEAVES malus
+     * being tuned too low). That framing does not fit the AMENDED, gate-mandated fix
+     * mechanism actually shipped in commit 4: {@code DragonNodeEvaluator} does not add a
+     * malus tier at all — a qualifying node is fully reclassified to {@code PathType.OPEN}
+     * (malus 0, byte-identical cost to genuinely clear air), matching vanilla's own
+     * small-mob refinement exactly. Under that mechanism a canopy-adjacent route and a
+     * genuinely clear route of equal length are cost-INDISTINGUISHABLE by design, so
+     * asserting a route "preference" between them would be asserting an unspecified A*
+     * tie-break order, not a real invariant — and per C7 this harness does not ship
+     * assertions on tie-break order. This test instead exercises the fix's OTHER stated
+     * half — "a node whose centre IS a leaf block stays BLOCKED" — which the ceiling test
+     * above cannot exercise at all, since every node in that scenario has an open centre.
+     * Two assertions: the path still reaches the target (proving the halo around the
+     * single block does not cause a total failure, the same box-sampling defect as the
+     * ceiling test, just localized), and the path never places a node exactly at the
+     * leaf block's own position (proving the dragon is routed around the block, not
+     * through its solid interior).
+     *
+     * <p>
+     * Flies at y=2, one block of open-air buffer above the floor, for the same reason
+     * documented on {@link #flightPathThroughLeafCanopyIsReachable} — a node directly
+     * above solid ground classifies {@code WALKABLE}, not {@code OPEN}, so the fix's
+     * {@code getPathType(...) == OPEN} guard would never fire at y=1.
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void flightPathRoutesAroundIsolatedLeafBlock(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(14, 0, 14), Blocks.STONE.defaultBlockState());
+        // Floor-to-ceiling side walls sealing the trench to z=5-9 (no sideways detour),
+        // PLUS a solid stone ceiling sealing off the vertical escape too (no flying up
+        // and over the leaf block's y=2-only footprint either). The ceiling sits at
+        // y=5, not directly above the y=2 flight layer: entityHeight=3 means a y0=2
+        // node's OWN sampling box already reaches all the way to y=4, so a ceiling at
+        // y=3 or y=4 would corrupt the flight layer's own classification (confirmed
+        // empirically — an earlier revision put the ceiling at y=3, directly inside
+        // that box, and the test failed even WITH the fix applied, nodeCount=1, because
+        // every y=2 node now touched genuine solid stone, not a leaf, so the fix's
+        // LEAVES-only guard never applied at all). A y=5 ceiling is clear of y0=2's box
+        // ([2,3,4]) but still blocks y0=3's box ([3,4,5], reaches y=5) and y0=4's
+        // ([4,5,6]) — the vertical escape route is closed without touching the layer
+        // under test. This needs LARGE_TEMPLATE (24 tall) instead of the class's default
+        // SMALL_TEMPLATE (5 tall), which has no room above y=4 for a y=5 ceiling at all.
+        // A first revision (no ceiling) and a second (ceiling at y=3, corrupting the
+        // flight layer) were both empirically wrong via the actual red/green cycle — see
+        // this method's javadoc.
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(14, 6, 4), Blocks.STONE.defaultBlockState());
+        fillBox(helper, new BlockPos(0, 0, 10), new BlockPos(14, 6, 14), Blocks.STONE.defaultBlockState());
+        fillBox(helper, new BlockPos(0, 5, 5), new BlockPos(14, 5, 9), Blocks.STONE.defaultBlockState());
+
+        BlockPos leafPos = new BlockPos(7, 2, 7);
+        helper.setBlock(leafPos, Blocks.OAK_LEAVES.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 7));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos target = helper.absolutePos(new BlockPos(12, 2, 7));
+        Path path = navigation.createPath(target, 0);
+
+        if (path == null || !path.canReach()) {
+            helper.fail("DIAGNOSTIC flight path around isolated leaf block did not reach: path="
+                    + (path == null ? "null" : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount()))
+                    + " target=" + target);
+            return;
+        }
+
+        BlockPos leafAbsolute = helper.absolutePos(leafPos);
+        for (int i = 0; i < path.getNodeCount(); i++) {
+            if (path.getNodePos(i).equals(leafAbsolute)) {
+                helper.fail("Path routed a node directly onto the leaf block's own position "
+                        + leafAbsolute + " (node " + i + ") — a leaf-centred node must stay BLOCKED, not merely costed");
+            }
+        }
+
+        helper.succeed();
+    }
 }
