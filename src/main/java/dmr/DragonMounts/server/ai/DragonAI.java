@@ -298,6 +298,27 @@ public class DragonAI {
      * re-selects a still-valid, still-sensed hostile on the very next brain tick
      * and the whistle's interrupt is undone before the dragon ever moves.
      *
+     * <p>
+     * This guard's scope is exactly this behavior ({@code StartAttacking}, fed by
+     * {@code NEAREST_ATTACKABLE}), NOT the whistle interrupt as a whole. It does
+     * NOT gate {@link #createTargetAcquisitionBehavior()}, the {@code Activity.IDLE}
+     * priority-0 behavior that wraps {@code OwnerHurtByTargetGoal}/
+     * {@code OwnerHurtTargetGoal}/{@code HurtByTargetGoal} — those vanilla
+     * {@code TargetGoal}s call {@code Mob#setTarget} directly from their own
+     * {@code start()} (verified against decompiled {@code
+     * OwnerHurtByTargetGoal#start}), which {@code DragonCombatComponent#setTarget}
+     * writes straight into {@code ATTACK_TARGET}, bypassing this predicate entirely.
+     * A dragon that is actually trading blows, or whose owner is being hit, when the
+     * owner whistles can therefore re-acquire on the very next brain tick regardless
+     * of the grace window. This is a known, deliberately-parked gap, NOT extended
+     * here because closing it would suppress the dragon's own retaliation/owner-
+     * defense for the whole grace window — a separate player-visible behavior change
+     * that needs its own C8 config flag. See
+     * .fork-notes/wave8/red-baseline.md (fix-round, required change #2,
+     * summon-behavior cluster) — commit 22 (the other consumer of {@code
+     * createAttackInitiationBehavior}'s predicate, per the wave plan) should read
+     * this before assuming the interrupt is complete.
+     *
      * @return The configured attack initiation behavior
      */
     private static BehaviorControl<TameableDragonEntity> createAttackInitiationBehavior() {

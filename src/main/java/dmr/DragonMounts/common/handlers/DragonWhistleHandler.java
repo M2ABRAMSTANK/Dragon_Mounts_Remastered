@@ -604,9 +604,21 @@ public class DragonWhistleHandler {
         // DragonAttackablesSensor re-populates NEAREST_ATTACKABLE on its own cadence,
         // so a bare erase is undone by StartAttacking on the very next brain tick
         // whenever the hostile is still sensed and valid. The grace window (see
-        // DragonAI#createAttackInitiationBehavior) is what actually keeps FIGHT from
-        // re-selecting while the dragon transitions to the owner — applies uniformly
-        // to all three branches below (cross-dimension, walk, teleport).
+        // DragonAI#createAttackInitiationBehavior) closes THAT gap uniformly for all
+        // three branches below (cross-dimension, walk, teleport) — but it is scoped
+        // to StartAttacking/NEAREST_ATTACKABLE only. It does NOT gate
+        // createTargetAcquisitionBehavior, the Activity.IDLE priority-0 behavior that
+        // wraps OwnerHurtByTargetGoal/OwnerHurtTargetGoal/HurtByTargetGoal — those
+        // vanilla goals call Mob#setTarget directly from their own start(), which
+        // DragonCombatComponent#setTarget writes straight into ATTACK_TARGET, so a
+        // dragon that is actually trading blows (or whose owner is being hit) when
+        // the whistle is used can re-acquire on the very next brain tick regardless
+        // of this grace window. Deliberately NOT extended to cover that path here:
+        // doing so would suppress the dragon's own self-defense/owner-defense for
+        // WHISTLE_RECALL_GRACE_TICKS, a separate player-visible behavior change that
+        // needs its own C8 config flag, not a silent side effect of this one. Parked
+        // with reasoning in .fork-notes/wave8/red-baseline.md (fix-round, required
+        // change #2, summon-behavior cluster).
         dragon.getBrain().eraseMemory(MemoryModuleType.ATTACK_TARGET);
         dragon.setWhistleRecallGraceUntilTick(dragon.level().getGameTime() + WHISTLE_RECALL_GRACE_TICKS);
 
