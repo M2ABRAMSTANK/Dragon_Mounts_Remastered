@@ -247,6 +247,17 @@ public class ServerConfig {
             category = "behavior")
     public static boolean PERSIST_HATCHED_DRAGONS = true;
 
+    @Config(
+            key = "dragon_team_passivity",
+            comment = {
+                "Tamed dragons will never attack (or continue attacking) a player who is teamed with",
+                "the dragon's owner via FTB Teams or Open Parties and Claims, even if that player",
+                "accidentally hits the dragon or the owner attacks them first.",
+                "Vanilla scoreboard-team allies are always protected regardless of this flag."
+            },
+            category = "behavior")
+    public static boolean DRAGON_TEAM_PASSIVITY = true;
+
     // Initialize the config
     static {
         MOD_CONFIG_SPEC = ConfigProcessor.processConfig(ServerConfig.class);
