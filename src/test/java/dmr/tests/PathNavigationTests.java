@@ -849,4 +849,200 @@ public class PathNavigationTests {
             throw new IllegalStateException("Failed to invoke canMoveDirectly via reflection", e);
         }
     }
+
+    // ---------------------------------------------------------------------------------
+    // W8-PF2 (commit 6)
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * W8-PF2. Establishes a live, in-progress path via {@code navigation.moveTo(...)}
+     * (which populates {@code PathNavigation}'s own {@code this.path} field — the
+     * "currently being followed" path, not merely a {@code createPath} return value),
+     * then — still inside the 5-tick throttle window, since {@code moveTo}'s internal
+     * {@code createPath} call reset {@code lastPathCreationDelta} to 0 and no {@code
+     * navigation.tick()} is called in between — requests the exact SAME target again.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, {@code createPath} returned {@code null}
+     * unconditionally whenever throttled, regardless of whether a perfectly good live
+     * path already existed for the same destination — which upstream vanilla consumers
+     * (verified in refute-pathfind.json missedBugs#4: {@code
+     * MoveToTargetSink.tryComputePath} erases {@code WALK_TARGET} on null; {@code
+     * PathNavigation.recomputePath} does {@code this.path = null; this.path =
+     * this.createPath(...)}, so a throttled null permanently destroys the in-flight
+     * path) treat as "target unreachable."
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void throttledCreatePathReusesLivePathInsteadOfNull(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(34, 0, 4), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 2));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos target = helper.absolutePos(new BlockPos(20, 2, 2));
+        boolean started = navigation.moveTo(target.getX(), target.getY(), target.getZ(), 1, 1.0);
+        Path livePath = navigation.getPath();
+        if (!started || livePath == null || livePath.isDone()) {
+            helper.fail("DIAGNOSTIC setup failed to establish a live, in-progress path: started=" + started
+                    + " path=" + (livePath == null
+                            ? "null"
+                            : ("isDone=" + livePath.isDone() + " nodeCount=" + livePath.getNodeCount())));
+            return;
+        }
+
+        // Still inside the 5-tick throttle window — request the SAME target again.
+        Path secondCall = navigation.createPath(target, 1);
+        if (secondCall == null) {
+            helper.fail("Throttled createPath for the SAME target returned null instead of the live path"
+                    + " — this is exactly the bug that erases WALK_TARGET / destroys in-flight paths"
+                    + " (refute-pathfind.json missedBugs#4)");
+            return;
+        }
+        if (secondCall != livePath) {
+            helper.fail(
+                    "Throttled createPath for the SAME target returned a DIFFERENT Path object instead of handing"
+                            + " back the live path unchanged");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-PF2, gate-required correction. Establishes a live path to a first target, then
+     * — still inside the throttle window — requests a genuinely DIFFERENT, far-apart
+     * target. Asserts the returned path is a fresh computation ending at the NEW target,
+     * not the stale first-target path.
+     *
+     * <p>
+     * Failure mode caught: the AMENDED fix's own failure mode, distinct from the
+     * original bug — naively returning {@code this.path} for ANY throttled request (with
+     * no same-target check) would serve the FOLLOW-goal's path to, say, a {@code
+     * RandomStroll} request or vice versa, sending the dragon to the wrong place. Per
+     * gate-design-pathfind.json's W8-PF2 requiredChanges: "Add a gametest that requests a
+     * DIFFERENT target inside the throttle window and asserts the returned path's end
+     * node is the newly requested target, not the old one."
+     */
+    @EmptyTemplate(LARGE_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void throttledCreatePathToADifferentTargetComputesFreshPath(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(34, 0, 4), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 2));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos firstTarget = helper.absolutePos(new BlockPos(15, 2, 2));
+        boolean started = navigation.moveTo(firstTarget.getX(), firstTarget.getY(), firstTarget.getZ(), 1, 1.0);
+        Path firstPath = navigation.getPath();
+        if (!started || firstPath == null || firstPath.isDone()) {
+            helper.fail("DIAGNOSTIC setup failed to establish a live path to the FIRST target: started=" + started);
+            return;
+        }
+
+        // Still inside the throttle window (no navigation.tick() call since moveTo) —
+        // request a target far enough away that it cannot be mistaken for the first.
+        BlockPos secondTarget = helper.absolutePos(new BlockPos(32, 2, 2));
+        Path secondPath = navigation.createPath(secondTarget, 1);
+        if (secondPath == null) {
+            helper.fail("Throttled createPath for a DIFFERENT target returned null — the same-target reuse"
+                    + " gate must fall through and compute fresh for a genuinely new destination");
+            return;
+        }
+        if (secondPath == firstPath) {
+            helper.fail("Throttled createPath for a DIFFERENT target returned the SAME Path object as the"
+                    + " first target — this sends the dragon to the WRONG place, a new bug the same shape as"
+                    + " the one this fix removes");
+            return;
+        }
+        BlockPos reachedTarget = secondPath.getTarget();
+        if (reachedTarget == null || reachedTarget.distSqr(secondTarget) > 1) {
+            helper.fail("Second createPath's returned Path targets " + reachedTarget + ", not the requested "
+                    + secondTarget + " — the throttle served a stale target instead of computing fresh");
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-PF2. Drives the fix through the REAL vanilla consumer per the gate's explicit
+     * requirement ("drive it through ServerLevel.blockUpdated/recomputePath rather than
+     * calling createPath directly, so it proves the vanilla consumer no longer destroys
+     * the path") — {@code helper.setBlock} goes through the genuine {@code
+     * Level.setBlock(pos, state, 3)} pipeline, which (per direct read of decompiled
+     * {@code Level.markAndNotifyBlock}) synchronously calls {@code
+     * ServerLevel.sendBlockUpdated}, which in turn calls {@code
+     * PathNavigation.shouldRecomputePath} for every mob in {@code
+     * ServerLevel.navigatingMobs} (populated on entity tracking start — i.e. on spawn,
+     * regardless of whether a path is active yet) and, if true, {@code recomputePath()}.
+     *
+     * <p>
+     * The changed block sits above the y=2 flight layer (y=4, near the room's ceiling),
+     * off the actual flight route, so the corridor stays genuinely reachable — any
+     * failure here is attributable to the throttle bug, not a real obstruction. It is
+     * still well within {@code shouldRecomputePath}'s geometric threshold ({@code
+     * pos.closerToCenterThan(midpoint-of-mob-and-path-end, remaining-node-count)}) since
+     * it sits directly above the route's midpoint.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, {@code recomputePath()} does {@code this.path =
+     * null;} THEN calls {@code createPath(...)} — while still inside the 5-tick
+     * throttle window (true here: {@code moveTo}'s internal {@code createPath} call
+     * reset the counter to 0, and no {@code navigation.tick()} runs before the block
+     * change), the old code's unconditional {@code return null;} means the assignment
+     * `this.path = this.createPath(...)` sets {@code this.path} to {@code null} —
+     * permanently wiping the in-flight path as a side effect of a nearby, entirely
+     * survivable block change (refute-pathfind.json missedBugs#4: "any nearby block
+     * change has an ~80% chance of deleting the dragon's path outright").
+     */
+    @EmptyTemplate(SMALL_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void blockUpdateNearDragonDoesNotWipeInFlightPath(ExtendedGameTestHelper helper) {
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(14, 0, 14), Blocks.STONE.defaultBlockState());
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 7));
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos target = helper.absolutePos(new BlockPos(12, 2, 7));
+        boolean started = navigation.moveTo(target.getX(), target.getY(), target.getZ(), 1, 1.0);
+        Path livePath = navigation.getPath();
+        if (!started || livePath == null || livePath.isDone()) {
+            helper.fail("DIAGNOSTIC setup failed to establish a live in-flight path before the block update");
+            return;
+        }
+
+        // Real block-change pipeline — NOT createPath called directly. Still inside the
+        // 5-tick throttle window (no navigation.tick() call since moveTo).
+        helper.setBlock(new BlockPos(7, 4, 7), Blocks.STONE.defaultBlockState());
+
+        if (navigation.getPath() == null) {
+            helper.fail("A nearby, entirely survivable block change wiped the in-flight path to null —"
+                    + " the throttled createPath call triggered by PathNavigation.recomputePath returned null"
+                    + " instead of computing (or falling through to compute) a fresh path");
+            return;
+        }
+
+        helper.succeed();
+    }
 }

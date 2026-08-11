@@ -67,10 +67,41 @@ public class DragonPathNavigation extends FlyingPathNavigation {
 
     @Override
     public @Nullable Path createPath(BlockPos pos, int accuracy) {
+        // W8-PF2: the throttle must never masquerade as "target unreachable". Vanilla
+        // callers treat a null return as a genuine failure — MoveToTargetSink.tryComputePath
+        // erases WALK_TARGET on null, and PathNavigation.recomputePath does
+        // `this.path = null; this.path = this.createPath(...)`, so a throttled null
+        // PERMANENTLY destroys the live in-flight path (refute-pathfind.json
+        // missedBugs#4). When throttled AND a live, non-done path already targets the
+        // SAME destination as this request (within `accuracy`), hand that path back
+        // unchanged instead of lying. Note `this.path` here is PathNavigation's own
+        // "currently being followed" field (set by moveTo/recomputePath), not merely the
+        // return value of the last createPath call — matching vanilla's own same-target
+        // reuse guard in createPath(Set,...).
+        //
+        // A DIFFERENT destination requested inside the throttle window is deliberately
+        // NOT served the stale path — this navigation is shared by
+        // StayCloseToTarget/MoveToTargetSink/attack targeting/RandomStroll/recomputePath,
+        // so serving the wrong target would be a new bug worse than the one being fixed.
+        // It falls through to the branch below and computes fresh, exactly like a
+        // throttled request with no usable cached path at all (first-ever call, or a
+        // path just nulled by recomputePath's eager reset / stuck-detection).
         if (lastPathCreationDelta < TICKS_BETWEEN_PATH_CREATIONS) {
-            return null;
+            BlockPos currentTarget = getTargetPos();
+            if (this.path != null
+                    && !this.path.isDone()
+                    && currentTarget != null
+                    && currentTarget.distSqr(pos) <= (long) accuracy * (long) accuracy) {
+                return this.path;
+            }
         }
 
+        // Reset on EVERY branch that reaches here — i.e. both "window elapsed" AND
+        // "throttled but nothing usable to fall back on" — not only the window-elapsed
+        // case. Resetting only on window-elapsed (the original sketch's bug) means an
+        // unreachable or freshly-retargeted request never re-arms the throttle, so a
+        // dragon with no reachable path would run a full A* EVERY tick instead of
+        // 1-in-5 — a live-server regression precisely where A* is most expensive.
         lastPathCreationDelta = 0;
 
         // W8-PF3: derive drown-immunity through the existing canDrownInFluidType helper
