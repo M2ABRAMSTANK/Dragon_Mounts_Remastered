@@ -224,11 +224,29 @@ public class DMRCommand {
         ServerLevel level = source.getLevel();
 
         var dragonEntity = ModEntities.DRAGON_ENTITY.get().create(level);
+
+        boolean added = false;
         if (dragonEntity instanceof TameableDragonEntity dragon) {
             dragon.load(nbt);
+            // W8-SYNC-4b+4c: mint with a fresh real UUID like every other DMR minting
+            // path (mirrors DragonOwnerCapability#createDragonEntity's precedent at
+            // dragon.setUUID(UUID.randomUUID())), removing the real-UUID collision
+            // surface at its source rather than trusting a pasted NBT's "UUID" tag to
+            // be unique. The separately-loaded custom dragonUUID field (a different
+            // NBT key, already read by load(nbt) above) is untouched.
+            dragon.setUUID(UUID.randomUUID());
             dragon.setPos(position.x, position.y, position.z);
             dragon.setBreed(breed);
-            level.addFreshEntity(dragon);
+            added = level.addFreshEntity(dragon);
+        }
+
+        // W8-SYNC-4b+4c: gate success on BOTH the instanceof branch having actually
+        // been taken (dragonEntity was really a TameableDragonEntity) AND the mint
+        // having actually joined — today this reports success even when create()
+        // returns null or a non-dragon, or when the join was refused.
+        if (!added) {
+            source.sendFailure(Component.translatable("dmr.commands.dragon_spawn.failure", breedName));
+            return 0;
         }
 
         source.sendSuccess(() -> Component.translatable("dmr.commands.dragon_spawn.success", breed.getName()), true);
@@ -257,6 +275,20 @@ public class DMRCommand {
                         existing.getZ())));
                 return 0;
             }
+
+            // W8-SYNC-4b+4c: the mint below stamps the recalled entity's REAL UUID
+            // with `id` (dragon.setUUID(id)) — refuse up front if any entity, dragon
+            // or not, already holds that real UUID anywhere. The dragonUUID scan
+            // above cannot catch this: a colliding entity need not be a dragon at
+            // all, and this is the one DMR minting path where the caller supplies
+            // the real UUID directly instead of DMR generating a fresh random one —
+            // closing the only DMR-manufacturable duplicate-real-UUID configuration.
+            if (candidateLevel.getEntity(id) != null) {
+                source.sendFailure(Component.literal(String.format(
+                        "An entity with UUID %s already exists in %s — refusing to recall a colliding real UUID",
+                        id, candidateLevel.dimension().location())));
+                return 0;
+            }
         }
 
         DragonHistory history = DragonWorldDataManager.getDragonHistory(source.getLevel(), id);
@@ -265,6 +297,7 @@ public class DMRCommand {
             ServerLevel level = source.getLevel();
             Optional<EntityType<?>> type = EntityType.by(nbt);
 
+            boolean added = false;
             if (type.isPresent()) {
                 Entity entity = type.get().create(level);
                 if (entity instanceof TameableDragonEntity dragon) {
@@ -283,8 +316,18 @@ public class DMRCommand {
                     // to each other, but staying consistent removes any doubt.
                     dragon.setSnapshotMintGameTime(
                             source.getServer().overworld().getGameTime());
-                    level.addFreshEntity(dragon);
+                    added = level.addFreshEntity(dragon);
                 }
+            }
+
+            // W8-SYNC-4b+4c: report honest results — the caller-supplied UUID being
+            // free (checked above) does not guarantee a later-registered listener or
+            // some other mid-mint condition won't still refuse the join.
+            if (!added) {
+                source.sendFailure(Component.literal("Failed to recall dragon " + id
+                        + " — the entity's join was refused (a third-party mod cancelled it, or its"
+                        + " NBT snapshot did not resolve to a valid dragon entity type)"));
+                return 0;
             }
 
             source.sendSuccess(() -> Component.translatable("dmr.commands.dragon_recall.success", id.toString()), true);

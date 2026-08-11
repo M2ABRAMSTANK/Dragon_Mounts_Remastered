@@ -49,6 +49,7 @@
   "dmr.dragon_summon.tooltip.2": "Dead, Can be called back in %1$s seconds",
   "dmr.commands.dragon_spawn.invalid_breed": "Invalid breed: %1$s",
   "dmr.commands.dragon_spawn.success": "Spawned a %1$s",
+  "dmr.commands.dragon_spawn.failure": "Failed to spawn a %1$s: the entity's join was refused",
   "dmr.commands.dragon_recall.success": "The dragon has successfully been recalled",
   "dmr.commands.dragon_recall.failure": "Unable to recall the dragon",
   "dmr.commands.dragon_recall.suggest": "[%1$s] owned by: [%2$s] Last updated: [%3$s]",

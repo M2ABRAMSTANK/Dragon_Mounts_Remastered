@@ -3,30 +3,39 @@ package dmr.tests;
 import dmr.DMRTestConstants;
 import dmr.DragonMounts.common.capability.DragonOwnerCapability;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler;
-import dmr.DragonMounts.config.ServerConfig;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler.DragonInstance;
+import dmr.DragonMounts.config.ServerConfig;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModCapabilities;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModItems;
+import dmr.DragonMounts.server.commands.DMRCommand;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.items.DragonWhistleItem;
+import dmr.DragonMounts.server.worlddata.DragonWorldDataManager;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Consumer;
+import net.minecraft.commands.CommandSource;
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.portal.DimensionTransition;
+import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
@@ -1269,6 +1278,311 @@ public class DragonWhistleTests {
                     + " refused respawn mint — the binding was NOT correctly restored, so"
                     + " DragonWhistleEvent's dedup check treated the real dragon as the duplicate (C5"
                     + " violation: permanent dragon loss under duplicate_resolution=AGGRESSIVE)");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    // -----------------------------------------------------------------------------
+    // W8-SYNC-4b+4c (commit 15): /dmr recall and /dmr spawn
+    // -----------------------------------------------------------------------------
+
+    /**
+     * Minimal {@link CommandSource} that records every message routed through it,
+     * rather than requiring a real network connection. {@code CommandSourceStack
+     * #sendSuccess}/{@code #sendFailure} both funnel into {@code CommandSource
+     * #sendSystemMessage} unconditionally once {@code acceptsSuccess()}/{@code
+     * acceptsFailure()} return {@code true} (verified against the decompiled
+     * source) — a genuinely concrete, implementable capture seam, unlike the
+     * packet/client-message sends elsewhere in this wave (see commits 10-12 and
+     * this commit's own not-asserted note above) which have none.
+     */
+    private static final class CapturingCommandSource implements CommandSource {
+        final List<Component> messages = new ArrayList<>();
+
+        @Override
+        public void sendSystemMessage(Component component) {
+            messages.add(component);
+        }
+
+        @Override
+        public boolean acceptsSuccess() {
+            return true;
+        }
+
+        @Override
+        public boolean acceptsFailure() {
+            return true;
+        }
+
+        @Override
+        public boolean shouldInformAdmins() {
+            return false;
+        }
+    }
+
+    private static CommandSourceStack makeCapturingCommandSourceStack(
+            ExtendedGameTestHelper helper, Player player, CapturingCommandSource capture) {
+        return new CommandSourceStack(
+                capture,
+                player.position(),
+                Vec2.ZERO,
+                helper.getLevel(),
+                2,
+                "test",
+                Component.literal("test"),
+                helper.getLevel().getServer(),
+                player);
+    }
+
+    private static int invokeSpawnDragon(CommandSourceStack source, String breedName, Vec3 position, CompoundTag nbt) {
+        try {
+            Method method = DMRCommand.class.getDeclaredMethod(
+                    "spawnDragon", CommandSourceStack.class, String.class, Vec3.class, CompoundTag.class);
+            method.setAccessible(true);
+            return (int) method.invoke(null, source, breedName, position, nbt);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to invoke spawnDragon via reflection", e);
+        }
+    }
+
+    private static int invokeRunRecall(CommandSourceStack source, UUID id, Vec3 position) {
+        try {
+            Method method =
+                    DMRCommand.class.getDeclaredMethod("runRecall", CommandSourceStack.class, UUID.class, Vec3.class);
+            method.setAccessible(true);
+            return (int) method.invoke(null, source, id, position);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to invoke runRecall via reflection", e);
+        }
+    }
+
+    /**
+     * W8-SYNC-4b+4c regression: {@code /dmr spawn} must mint with a fresh random real
+     * UUID rather than preserving whatever "UUID" tag a pasted NBT snapshot happens to
+     * carry (mirrors {@code DragonOwnerCapability#createDragonEntity}'s existing
+     * precedent). Fails on pre-fix HEAD (the pasted UUID survives {@code load(nbt)}
+     * untouched); passes after the fix.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void spawnDragonMintsFreshRealUuidRatherThanThePastedNbtUuid(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var pastedUuid = UUID.randomUUID();
+        var nbt = new CompoundTag();
+        nbt.putUUID("UUID", pastedUuid);
+
+        var capture = new CapturingCommandSource();
+        var source = makeCapturingCommandSourceStack(helper, player, capture);
+
+        int result = invokeSpawnDragon(source, DragonBreedsRegistry.getDefault().getId(), player.position(), nbt);
+
+        if (result != 1) {
+            helper.fail("spawnDragon reported failure (" + result + ") for a plain, uncontested spawn");
+            return;
+        }
+
+        var spawned = helper.getLevel().getEntities(ModEntities.DRAGON_ENTITY.get(), d -> true);
+        if (spawned.isEmpty()) {
+            helper.fail("spawnDragon reported success but no dragon entity exists in the level");
+            return;
+        }
+
+        boolean keptPastedUuid = spawned.stream().anyMatch(d -> pastedUuid.equals(d.getUUID()));
+        if (keptPastedUuid) {
+            helper.fail("Spawned dragon kept the pasted NBT's real UUID (" + pastedUuid
+                    + ") instead of being minted with a fresh random one");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SYNC-4b+4c regression: {@code /dmr spawn} must report failure, not success,
+     * when the entity's join is refused (today it reports success unconditionally
+     * once {@code dragonEntity instanceof TameableDragonEntity} — even if
+     * {@code create()} returned a non-dragon, or the join itself was cancelled).
+     * Refusal forced the same way as commit 14's tests: a temporary {@code
+     * EntityJoinLevelEvent} listener. Fails on pre-fix HEAD ({@code spawnDragon}
+     * returns 1 regardless); passes after the fix (returns 0).
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void spawnDragonReportsFailureOnRefusedJoin(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        Consumer<EntityJoinLevelEvent> cancelDragonJoins = event -> {
+            if (event.getEntity() instanceof TameableDragonEntity) {
+                event.setCanceled(true);
+            }
+        };
+
+        var capture = new CapturingCommandSource();
+        var source = makeCapturingCommandSourceStack(helper, player, capture);
+
+        NeoForge.EVENT_BUS.addListener(EntityJoinLevelEvent.class, cancelDragonJoins);
+        int result;
+        try {
+            result = invokeSpawnDragon(
+                    source, DragonBreedsRegistry.getDefault().getId(), player.position(), new CompoundTag());
+        } finally {
+            NeoForge.EVENT_BUS.unregister(cancelDragonJoins);
+        }
+
+        if (result == 1) {
+            helper.fail("spawnDragon returned success (1) despite the entity's join being cancelled");
+            return;
+        }
+
+        if (capture.messages.isEmpty()) {
+            helper.fail("spawnDragon's refusal path sent no feedback message at all");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SYNC-4b+4c regression: {@code /dmr recall} must report failure, not success,
+     * when the entity's join is refused (today it unconditionally {@code
+     * sendSuccess}es after the mint attempt, regardless of whether
+     * {@code addFreshEntity} actually accepted it). Fails on pre-fix HEAD
+     * ({@code runRecall} returns success-shaped output regardless of the cancelled
+     * join); passes after the fix.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void runRecallReportsFailureOnRefusedJoin(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        var dragonUuid = dragon.getDragonUUID();
+
+        DragonWorldDataManager.addDragonHistory(dragon);
+        // The pre-check loop in runRecall refuses if a LIVE dragon with this
+        // dragonUUID already exists anywhere — discard so that check does not refuse
+        // for a reason unrelated to what this test targets.
+        dragon.discard();
+
+        Consumer<EntityJoinLevelEvent> cancelDragonJoins = event -> {
+            if (event.getEntity() instanceof TameableDragonEntity candidate
+                    && dragonUuid.equals(candidate.getDragonUUID())) {
+                event.setCanceled(true);
+            }
+        };
+
+        var capture = new CapturingCommandSource();
+        var source = makeCapturingCommandSourceStack(helper, player, capture);
+
+        NeoForge.EVENT_BUS.addListener(EntityJoinLevelEvent.class, cancelDragonJoins);
+        int result;
+        try {
+            result = invokeRunRecall(source, dragonUuid, player.position());
+        } finally {
+            NeoForge.EVENT_BUS.unregister(cancelDragonJoins);
+        }
+
+        if (result != 0) {
+            helper.fail("runRecall did not report the refused join as a failure (returned " + result + ")");
+            return;
+        }
+
+        var stillPresent = helper.getLevel()
+                .getEntities(ModEntities.DRAGON_ENTITY.get(), d -> dragonUuid.equals(d.getDragonUUID()));
+        if (!stillPresent.isEmpty()) {
+            helper.fail("A dragon with dragonUUID " + dragonUuid
+                    + " exists in the level despite its join having been cancelled");
+            return;
+        }
+
+        if (capture.messages.isEmpty()) {
+            helper.fail("runRecall's refusal path sent no feedback message at all");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SYNC-4b+4c regression: closes the cross-level real-UUID collision the gate
+     * required NOT be parked. {@code runRecall} stamps the recalled entity's REAL
+     * UUID with the caller-supplied {@code id} ({@code dragon.setUUID(id)}) — this is
+     * the only DMR minting path where the caller supplies the real UUID directly
+     * rather than DMR generating a fresh random one, so it is the only
+     * DMR-manufacturable way to end up with two live entities sharing a real UUID
+     * server-wide. The existing dragonUUID-based pre-check cannot catch this: the
+     * colliding entity here is a plain, unrelated entity with no dragonUUID at all.
+     * Fails on pre-fix HEAD (the pre-check loop only compares dragonUUID, never the
+     * real UUID {@code id} itself is about to be stamped with); passes after the fix.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void runRecallRefusesOnCrossLevelRealUuidCollision(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        var dragonUuid = dragon.getDragonUUID();
+
+        DragonWorldDataManager.addDragonHistory(dragon);
+        dragon.discard();
+
+        // A plain, unrelated entity (no dragonUUID at all) already holding the exact
+        // real UUID the recall is about to stamp onto its own mint. Built and
+        // UUID-stamped BEFORE ever touching the level, matching commit 14's own
+        // "no level-side UUID index to desync" precedent.
+        var colliding = EntityType.PIG.create(helper.getLevel());
+        if (colliding == null) {
+            helper.fail("Failed to construct the colliding entity");
+            return;
+        }
+        colliding.setUUID(dragonUuid);
+        var collidingPos = Vec3.atCenterOf(helper.absolutePos(DMRTestConstants.TEST_POS.offset(2, 0, 0)));
+        colliding.setPos(collidingPos.x, collidingPos.y, collidingPos.z);
+        if (!helper.getLevel().addFreshEntity(colliding)) {
+            helper.fail("Setup failed: could not add the colliding entity to the level");
+            return;
+        }
+
+        var capture = new CapturingCommandSource();
+        var source = makeCapturingCommandSourceStack(helper, player, capture);
+
+        int result = invokeRunRecall(source, dragonUuid, player.position());
+
+        if (result != 0) {
+            helper.fail("runRecall did not refuse a real-UUID collision with an unrelated (non-dragon, no"
+                    + " dragonUUID) entity already holding that UUID (returned " + result + ")");
+            return;
+        }
+
+        var minted = helper.getLevel()
+                .getEntities(ModEntities.DRAGON_ENTITY.get(), d -> dragonUuid.equals(d.getDragonUUID()));
+        if (!minted.isEmpty()) {
+            helper.fail("runRecall minted a dragon despite the real-UUID collision refusal");
             return;
         }
 
