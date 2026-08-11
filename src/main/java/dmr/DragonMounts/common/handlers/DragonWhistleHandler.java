@@ -726,6 +726,20 @@ public class DragonWhistleHandler {
     }
 
     /**
+     * W8-SYNC-4a: puts {@code preMintValue} back into {@code map} at {@code index} if
+     * it was present, or removes the key entirely if it was absent — i.e. restores the
+     * map to exactly its pre-mint state, never leaving a stray {@code null}/sentinel
+     * entry behind.
+     */
+    private static <V> void restoreOrRemove(ConcurrentHashMap<Integer, V> map, int index, Optional<V> preMintValue) {
+        if (preMintValue.isPresent()) {
+            map.put(index, preMintValue.get());
+        } else {
+            map.remove(index);
+        }
+    }
+
+    /**
      * LAST RESORT (Wave 2): respawn the dragon from its NBT snapshot. This is the single
      * choke point every "the dragon didn't resolve" path funnels into — the deferred
      * (chunk-ticketed) summon's timeout in {@link #processDeferredSummons} and the
@@ -761,20 +775,6 @@ public class DragonWhistleHandler {
      * sites risked exactly the kind of drift that under-detected real deaths in the
      * first place.
      */
-    /**
-     * W8-SYNC-4a: puts {@code preMintValue} back into {@code map} at {@code index} if
-     * it was present, or removes the key entirely if it was absent — i.e. restores the
-     * map to exactly its pre-mint state, never leaving a stray {@code null}/sentinel
-     * entry behind.
-     */
-    private static <V> void restoreOrRemove(ConcurrentHashMap<Integer, V> map, int index, Optional<V> preMintValue) {
-        if (preMintValue.isPresent()) {
-            map.put(index, preMintValue.get());
-        } else {
-            map.remove(index);
-        }
-    }
-
     private static boolean respawnDragonFromSnapshot(Player player, DragonOwnerCapability cap, int summonItemIndex) {
         // The binding can be cleaned up between a deferred summon's scheduling and its
         // re-check (canCall's invalid-data sweep, dragon death without respawn, ...);
@@ -955,12 +955,20 @@ public class DragonWhistleHandler {
 
         if (confirmedDead) {
             // Wave 5 review Blocker 1(a) / verify round: vanilla already removed the
-            // original on death — this can never be a clone. Do NOT flag it, and
-            // consume whichever death record(s) proved that (isConfirmedDead's javadoc)
-            // so a LATER, genuine "can't find it" mint for this same slot isn't wrongly
-            // treated as confirmed-dead too.
-            cap.respawnDelays.remove(summonItemIndex);
-            clearWorldDeathRecord(server, instance.getUUID());
+            // original on death — this can never be a clone. Do NOT flag it.
+            //
+            // Fix-round (C5 / Wave-5 snapshot-provenance invariant): consuming the
+            // death record(s) that proved this (isConfirmedDead's javadoc) is
+            // DEFERRED until after addFreshEntity below actually succeeds — see that
+            // block. Consuming it here, before the mint is known to have joined, used
+            // to permanently destroy the one-shot death signal even when the mint was
+            // then refused: a refused mint restores the whistle-binding triple (below)
+            // but NOT a death record consumed up here, so the player's immediate retry
+            // would compute confirmedDead == false for a dragon vanilla had already,
+            // genuinely confirmed dead — minting an unflagged, reclaim-eligible clone
+            // with mislabeled provenance. Both stores are persisted (capability NBT /
+            // per-level world data), so that mislabeling would have survived a
+            // restart.
         } else {
             // Wave 5, Fix B4: flag this entity as a snapshot-respawn clone BEFORE it
             // joins the level, so the join-time dedup check can prove (never guess)
@@ -1008,6 +1016,20 @@ public class DragonWhistleHandler {
                         Component.translatable("dmr.dragon_call.not_found").withStyle(ChatFormatting.RED), true);
             }
             return false;
+        }
+
+        // Fix-round (C5 / Wave-5 snapshot-provenance invariant): NOW that the mint has
+        // actually joined, it is safe to consume the one-shot death record(s) that
+        // proved `confirmedDead` above — so a LATER, genuine "can't find it" mint for
+        // this same slot isn't wrongly treated as confirmed-dead too. Deferred from
+        // right after the `confirmedDead` check (see the comment there) specifically
+        // so a REFUSED mint — which restores the pre-mint whistle-binding triple below
+        // it in the `!added` branch, but has no equivalent restore for a death record —
+        // leaves the death signal intact for the player's immediate retry instead of
+        // permanently destroying it.
+        if (confirmedDead) {
+            cap.respawnDelays.remove(summonItemIndex);
+            clearWorldDeathRecord(server, instance.getUUID());
         }
 
         // Wave 2 fix: createDragonEntity's setDragonToWhistle call wrote the DragonInstance
