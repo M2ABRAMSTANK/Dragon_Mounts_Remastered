@@ -44,6 +44,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.entity.ai.targeting.TargetingConditions;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ChunkPos;
@@ -577,6 +578,16 @@ public class DragonWhistleHandler {
                         configuredWalkMaxDistance, followRangeAttributeValue);
     }
 
+    /**
+     * W8-SUMMON-1b: how long (in ticks) a whistle recall's grace window lasts — see
+     * {@link TameableDragonEntity#isInWhistleRecallGrace()} and {@code
+     * DragonAI#createAttackInitiationBehavior}. 60 ticks (3s) gives the dragon time
+     * to actually transition off the fight (eject/sit-clear/teleport, or the first
+     * few ticks of owner-follow on the walk branch) before it becomes eligible to
+     * re-engage a still-sensed hostile.
+     */
+    public static final int WHISTLE_RECALL_GRACE_TICKS = 60;
+
     private static boolean summonExistingDragon(
             Player player, DragonOwnerCapability cap, int summonItemIndex, TameableDragonEntity dragon) {
         dragon.setHealth(Math.max(ModConstants.DragonConstants.MIN_DRAGON_HEALTH, dragon.getHealth()));
@@ -586,6 +597,18 @@ public class DragonWhistleHandler {
         dragon.ejectPassengers();
         dragon.setOrderedToSit(false);
         dragon.setWanderTarget(Optional.empty());
+
+        // W8-SUMMON-1b: a dragon whistled mid-fight must actually break off
+        // (missedBugs#3), not silently lose to Activity.FIGHT's higher priority.
+        // Erasing ATTACK_TARGET handles the already-invalid-target case, but
+        // DragonAttackablesSensor re-populates NEAREST_ATTACKABLE on its own cadence,
+        // so a bare erase is undone by StartAttacking on the very next brain tick
+        // whenever the hostile is still sensed and valid. The grace window (see
+        // DragonAI#createAttackInitiationBehavior) is what actually keeps FIGHT from
+        // re-selecting while the dragon transitions to the owner — applies uniformly
+        // to all three branches below (cross-dimension, walk, teleport).
+        dragon.getBrain().eraseMemory(MemoryModuleType.ATTACK_TARGET);
+        dragon.setWhistleRecallGraceUntilTick(dragon.level().getGameTime() + WHISTLE_RECALL_GRACE_TICKS);
 
         if (!player.level.dimension().equals(dragon.level().dimension())) {
             // Cross-dimension: teleport the real entity. PLACE_PORTAL_TICKET keeps the

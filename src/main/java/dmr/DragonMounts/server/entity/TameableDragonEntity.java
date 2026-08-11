@@ -73,6 +73,36 @@ public class TameableDragonEntity extends AbstractDragonEntity {
     @Setter
     private long snapshotMintGameTime = -1L;
 
+    /**
+     * W8-SUMMON-1b: the server game time ({@code Level#getGameTime()}) until which a
+     * whistle-recalled dragon refuses to (re)start a fight — see {@code
+     * DragonAI#createAttackInitiationBehavior}. Set in {@code
+     * DragonWhistleHandler#summonExistingDragon} whenever a dragon is whistled.
+     *
+     * <p>
+     * Deliberately a TRANSIENT field, never a {@code MemoryModuleType}: gate-compat's
+     * gaps section proved any new dmr memory module is persisted into entity NBT via
+     * the vanilla Brain codec, and a single unrecognised Brain key on load drops the
+     * ENTIRE memory set (C2 hazard) — registering a new module id is also its own
+     * connect-time compatibility risk (C3). NOT synced to the client (server-only AI
+     * bookkeeping) and NOT persisted via addAdditionalSaveData/readAdditionalSaveData
+     * — a grace window has no meaning across a save/load boundary, and 0 (the
+     * post-load default) correctly means "no active grace" on every fresh load.
+     */
+    private long whistleRecallGraceUntilTick = 0L;
+
+    public void setWhistleRecallGraceUntilTick(long tick) {
+        this.whistleRecallGraceUntilTick = tick;
+    }
+
+    /**
+     * @return whether this dragon is currently within a whistle recall grace window
+     *         (see {@link #whistleRecallGraceUntilTick}).
+     */
+    public boolean isInWhistleRecallGrace() {
+        return this.level().getGameTime() < this.whistleRecallGraceUntilTick;
+    }
+
     public TameableDragonEntity(EntityType<? extends TamableAnimal> pEntityType, Level pLevel) {
         super(pEntityType, pLevel);
     }

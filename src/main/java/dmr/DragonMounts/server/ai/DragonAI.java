@@ -289,11 +289,20 @@ public class DragonAI {
 
     /**
      * Creates a behavior for initiating attacks.
+     *
+     * <p>
+     * W8-SUMMON-1b: {@code !e.isInWhistleRecallGrace()} closes the gap a bare
+     * {@code eraseMemory(ATTACK_TARGET)} in {@code summonExistingDragon} cannot
+     * close on its own — {@link Sensor}s re-populate {@code NEAREST_ATTACKABLE}
+     * on their own cadence, so without this guard {@code StartAttacking} simply
+     * re-selects a still-valid, still-sensed hostile on the very next brain tick
+     * and the whistle's interrupt is undone before the dragon ever moves.
+     *
      * @return The configured attack initiation behavior
      */
     private static BehaviorControl<TameableDragonEntity> createAttackInitiationBehavior() {
         return BehaviorFactory.withCondition(
-                e -> !e.isSitting() && e.getAgroState() != DragonAgroState.PASSIVE,
+                e -> !e.isSitting() && e.getAgroState() != DragonAgroState.PASSIVE && !e.isInWhistleRecallGrace(),
                 StartAttacking.create(DragonAI::findNearestValidAttackTarget));
     }
 

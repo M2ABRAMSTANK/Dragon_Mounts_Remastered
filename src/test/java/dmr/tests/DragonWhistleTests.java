@@ -9,7 +9,9 @@ import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModCapabilities;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModItems;
+import dmr.DragonMounts.server.ai.DragonAI;
 import dmr.DragonMounts.server.commands.DMRCommand;
+import dmr.DragonMounts.server.entity.DragonAgroState;
 import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.items.DragonWhistleItem;
 import dmr.DragonMounts.server.worlddata.DragonWorldDataManager;
@@ -35,6 +37,9 @@ import net.minecraft.server.level.TicketType;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.ai.behavior.BehaviorControl;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+import net.minecraft.world.entity.monster.Zombie;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ChunkPos;
@@ -51,6 +56,7 @@ import net.neoforged.testframework.annotation.ForEachTest;
 import net.neoforged.testframework.annotation.TestHolder;
 import net.neoforged.testframework.gametest.EmptyTemplate;
 import net.neoforged.testframework.gametest.ExtendedGameTestHelper;
+import org.jetbrains.annotations.Nullable;
 
 @PrefixGameTestTemplate(false)
 @ForEachTest(groups = "Dragon Whistles")
@@ -1932,6 +1938,210 @@ public class DragonWhistleTests {
         if (walkMessages.size() > 1) {
             helper.fail("Walk-branch summon sent " + walkMessages.size()
                     + " dmr.dragon_call.walking messages instead of exactly one: " + walkMessages);
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    // -----------------------------------------------------------------------------
+    // W8-SUMMON-1b (commit 18): whistle recall grace
+    // -----------------------------------------------------------------------------
+
+    private record AggressiveDragonWithHostile(TameableDragonEntity dragon, Zombie hostile) {}
+
+    /**
+     * Spawns an AGGRESSIVE tamed dragon with a live {@code Zombie} inside {@link
+     * dmr.DragonMounts.server.ai.sensors.DragonAttackablesSensor}'s tamed-dragon range
+     * (distanceToSqr &lt;= 16.0, i.e. &lt;= 4 blocks) and seeds {@code
+     * NEAREST_ATTACKABLE} with it directly — AGGRESSIVE is required for the sensor to
+     * hunt at all for a tamed dragon, and the zombie matches the
+     * {@code dragon_hunting_target} tag (UNDEAD) the sensor's own target predicate
+     * checks, so the seeded value is exactly what the real sensor would independently
+     * compute (not a fabricated shortcut). The direct seed exists because callers
+     * invoke {@code createAttackInitiationBehavior} directly (see {@link
+     * #invokeAttackInitiationTryStart}) rather than ticking the dragon and waiting on
+     * the REAL {@code DragonAttackablesSensor} — that sensor only re-scans every ~20
+     * ticks with vanilla {@code Sensor}'s own randomized initial offset, which made an
+     * earlier tick-based version of these tests genuinely flaky (see red-baseline.md).
+     *
+     * <p>
+     * Shared setup for both {@link #whistleRecallGraceBlocksAttackInitiation} and its
+     * positive control {@link #attackInitiationStartsWithoutRecallGrace}. Fails the
+     * test outright (returns {@code null}) if the hostile could not be constructed or
+     * added — callers must check for that before proceeding.
+     */
+    @Nullable
+    private static AggressiveDragonWithHostile spawnAggressiveDragonWithLiveHostileInRange(
+            ExtendedGameTestHelper helper, ServerPlayer player) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+        dragon.setAgroState(DragonAgroState.AGGRESSIVE);
+
+        var hostile = EntityType.ZOMBIE.create(helper.getLevel());
+        if (hostile == null) {
+            helper.fail("Setup failed: could not construct the hostile mob");
+            return null;
+        }
+        hostile.setPos(dragon.getX() + 2, dragon.getY(), dragon.getZ());
+        if (!helper.getLevel().addFreshEntity(hostile)) {
+            helper.fail("Setup failed: could not add the hostile mob to the level");
+            return null;
+        }
+        dragon.getBrain().setMemory(MemoryModuleType.NEAREST_ATTACKABLE, hostile);
+        return new AggressiveDragonWithHostile(dragon, hostile);
+    }
+
+    /**
+     * Invokes {@code DragonAI.createAttackInitiationBehavior()}'s {@code tryStart} —
+     * the EXACT behavior this commit gates with {@code !isInWhistleRecallGrace()} —
+     * directly via reflection, bypassing {@code Brain} activity selection and
+     * {@code Sensor} scan-rate timing entirely. This is deterministic where ticking
+     * the dragon through its normal AI loop is not: {@code
+     * BehaviorWrapper#tryStart} evaluates the gating predicate and (if it passes)
+     * runs the wrapped {@code StartAttacking} synchronously, on the calling thread,
+     * with no dependency on which {@code Activity} happens to be selected or on any
+     * sensor having fired yet.
+     *
+     * <p>
+     * Deliberately IGNORES the returned boolean: {@code BehaviorWrapper#tryStart}
+     * returns {@code true} once the predicate and memory-presence gates pass,
+     * regardless of whether the WRAPPED {@code StartAttacking} behavior itself
+     * actually set {@code ATTACK_TARGET} — the memory state after the call is the
+     * only reliable signal, which is what every caller here checks.
+     */
+    private static void invokeAttackInitiationTryStart(ServerLevel level, TameableDragonEntity dragon) {
+        try {
+            Method method = DragonAI.class.getDeclaredMethod("createAttackInitiationBehavior");
+            method.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            var behavior = (BehaviorControl<TameableDragonEntity>) method.invoke(null);
+            behavior.tryStart(level, dragon, level.getGameTime());
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to invoke createAttackInitiationBehavior via reflection", e);
+        }
+    }
+
+    /**
+     * W8-SUMMON-1b: proves the grace window actually BLOCKS attack (re-)initiation,
+     * not merely that the one-shot {@code eraseMemory(ATTACK_TARGET)} line exists
+     * (the gate's explicit critique of the original design's zero-tick assertion,
+     * which could not distinguish "the erase ran" from "the erase actually mattered").
+     * The dragon is put into a simulated mid-fight state (ATTACK_TARGET pre-set to
+     * the live hostile — a dragon with no target at all would trivially pass
+     * regardless of the fix); the whistle is called (erasing ATTACK_TARGET and
+     * arming the grace window); {@link #invokeAttackInitiationTryStart} is then
+     * invoked directly — the exact behavior a subsequent brain tick would run — and
+     * ATTACK_TARGET must remain empty. Companion positive control: {@link
+     * #attackInitiationStartsWithoutRecallGrace} proves the IDENTICAL rig (same
+     * setup helper, same direct invocation) DOES re-populate ATTACK_TARGET when no
+     * grace is set — without it, this test's "still empty" assertion could pass
+     * vacuously if the hostile-detection rig (tag/agro-state) were simply broken.
+     *
+     * <p>
+     * Fails on pre-fix HEAD (StartAttacking re-selects the still-present hostile
+     * immediately after the erase, with no grace guard to stop it — see
+     * red-baseline.md for the captured failure); passes after the fix.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void whistleRecallGraceBlocksAttackInitiation(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var setup = spawnAggressiveDragonWithLiveHostileInRange(helper, player);
+        if (setup == null) {
+            return; // helper.fail already called
+        }
+        var dragon = setup.dragon();
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        // Simulate mid-fight: a dragon already engaged in combat holds ATTACK_TARGET
+        // (Activity.FIGHT) directly.
+        dragon.getBrain().setMemory(MemoryModuleType.ATTACK_TARGET, setup.hostile());
+
+        // Well inside the walk band — moves the PLAYER, not the dragon, so the
+        // dragon/hostile distance (and therefore NEAREST_ATTACKABLE's validity) is
+        // untouched by the summon.
+        player.moveTo(dragon.getX() + 6, dragon.getY(), dragon.getZ());
+
+        boolean called = DragonWhistleHandler.callDragon(player);
+        if (!called) {
+            helper.fail("callDragon reported failure for a plain, uncontested walk-band summon");
+            return;
+        }
+
+        if (dragon.getBrain().hasMemoryValue(MemoryModuleType.ATTACK_TARGET)) {
+            helper.fail("The whistle did not erase ATTACK_TARGET at all — cannot exercise the grace guard");
+            return;
+        }
+
+        invokeAttackInitiationTryStart((ServerLevel) helper.getLevel(), dragon);
+
+        if (dragon.getBrain().hasMemoryValue(MemoryModuleType.ATTACK_TARGET)) {
+            helper.fail("createAttackInitiationBehavior set ATTACK_TARGET immediately after a whistle recall,"
+                    + " despite the grace window — the grace guard did not hold");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SUMMON-1b positive control for {@link #whistleRecallGraceBlocksAttackInitiation}:
+     * the IDENTICAL rig (AGGRESSIVE dragon, live in-range hostile seeded into
+     * NEAREST_ATTACKABLE, ATTACK_TARGET erased) and the IDENTICAL direct invocation,
+     * but with NO whistle call — so no grace window is ever armed — must have
+     * ATTACK_TARGET (re-)populated. Without this test, the main test's "still empty"
+     * assertion could pass vacuously if the hostile-detection rig (wrong tag, wrong
+     * agro state, reflection seam broken) were simply non-functional rather than
+     * because the grace guard actually did its job.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void attackInitiationStartsWithoutRecallGrace(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var setup = spawnAggressiveDragonWithLiveHostileInRange(helper, player);
+        if (setup == null) {
+            return; // helper.fail already called
+        }
+        var dragon = setup.dragon();
+
+        // Same erase summonExistingDragon performs — but with NO grace window set,
+        // so nothing suppresses createAttackInitiationBehavior's predicate.
+        dragon.getBrain().eraseMemory(MemoryModuleType.ATTACK_TARGET);
+
+        invokeAttackInitiationTryStart((ServerLevel) helper.getLevel(), dragon);
+
+        var reacquired = dragon.getBrain().getMemory(MemoryModuleType.ATTACK_TARGET);
+        if (reacquired.isEmpty()) {
+            helper.fail("ATTACK_TARGET was never reacquired without a recall grace — the hostile-detection rig"
+                    + " (tag/agro-state) or the reflection seam is not actually functional, which would make the"
+                    + " companion grace test's \"still empty\" assertion vacuous");
+            return;
+        }
+        if (!reacquired.get().is(setup.hostile())) {
+            helper.fail("ATTACK_TARGET was reacquired but points at a different entity than the seeded hostile: "
+                    + reacquired.get());
             return;
         }
 
