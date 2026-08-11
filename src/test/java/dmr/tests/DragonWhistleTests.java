@@ -1106,7 +1106,7 @@ public class DragonWhistleTests {
      * An adversarial review found every distance already exercised by this suite
      * sits outside the "discriminating band" the flip actually changed:
      * {@link #sameDimensionTeleportRefreshesDragonInstanceBinding} uses 80 blocks,
-     * {@link #dragonFollowsWhenCalled} uses ~7, and
+     * {@link #dragonFollowsWhenCalled} uses 14, and
      * {@link #walkBranchSummonSendsExactlyOneFeedbackMessage} uses 6 — none of
      * those falls inside 33-64, the band that used to WALK under the pre-fix
      * {@code DragonConstants.BASE_FOLLOW_RANGE * ModConstants.DragonConstants
@@ -2803,6 +2803,120 @@ public class DragonWhistleTests {
                     + " fast path should resolve both, unthrottled) produced " + followMessages.size()
                     + " dmr.command_mode.follow.text messages instead of 2 — a throttle wrongly applied to the"
                     + " fast path would silently swallow the second press (all messages seen: " + messages + ")");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Fix-round (command-packet-tests cluster): {@link
+     * #twoConsecutiveFollowPressesBothTakeEffect} only ever exercises the UNTHROTTLED
+     * fast path (its binding's stored {@code entityId} stays valid throughout, per
+     * its own javadoc) — the throttled branch commit 19 introduced had zero coverage
+     * anywhere in the suite. This reuses {@link
+     * #followCommandResolvesWithStaleEntityIdBinding}'s stale-entityId/correct-
+     * dragonUUID binding so the fast path MISSES on every press, forcing both
+     * presses through {@code findDragon} and therefore the throttle. The first press
+     * (findDragon not yet throttled) must resolve the dragon and emit exactly one
+     * {@code dmr.command_mode.follow.text}; the second, issued back-to-back with no
+     * tick advance (the 10-tick throttle window cannot have elapsed), must be
+     * suppressed — and report that suppression honestly via the documented {@code
+     * dmr.dragon_call.on_cooldown} signal, never the misleading {@code
+     * dmr.dragon_call.not_found} (the dragon resolved successfully moments earlier),
+     * and must not further mutate the dragon's sit/wander state beyond what the
+     * first press already did. Mock players get a fresh {@code UUID.randomUUID()}
+     * per test (disassembled {@code ExtendedGameTestHelper
+     * #makeTickingMockServerPlayerInLevel}), so the static throttle map cannot leak
+     * state across concurrently-batched tests — this test is deterministic.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void secondFollowPressWithinThrottleWindowGetsCooldownSignalNotNotFound(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+        dragon.setOrderedToSit(true);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        // Same corruption as followCommandResolvesWithStaleEntityIdBinding: correct
+        // dragonUUID, random non-matching entityId — forces every press to miss the
+        // fast path and fall through to findDragon (and therefore the throttle),
+        // instead of twoConsecutiveFollowPressesBothTakeEffect's unthrottled shape.
+        cap.setDragonInstance(index, new DragonInstance(player.level, UUID.randomUUID(), dragon.getDragonUUID()));
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        drainSystemChatMessages(player);
+
+        new DragonCommandPacket(Command.FOLLOW).handleServer(null, player);
+
+        if (dragon.isOrderedToSit()) {
+            helper.fail("First FOLLOW press did not resolve the dragon through the stale-entityId binding — the"
+                    + " dragon is still sitting, so this test cannot validate the throttle on the second press.");
+            return;
+        }
+
+        var firstMessages = drainSystemChatMessages(player);
+        var firstFollowCount = firstMessages.stream()
+                .filter(component -> component.getContents() instanceof TranslatableContents contents
+                        && "dmr.command_mode.follow.text".equals(contents.getKey()))
+                .count();
+        if (firstFollowCount != 1) {
+            helper.fail("First FOLLOW press (through the stale-entityId fallback, unthrottled) produced "
+                    + firstFollowCount + " dmr.command_mode.follow.text messages instead of 1 (all messages seen: "
+                    + firstMessages + ")");
+            return;
+        }
+
+        // Back-to-back with no tick advance: level.getGameTime() cannot have moved, so
+        // the 10-tick throttle window is still open from the first press's stamp.
+        new DragonCommandPacket(Command.FOLLOW).handleServer(null, player);
+
+        if (dragon.isOrderedToSit() || dragon.hasWanderTarget()) {
+            helper.fail("Throttle-suppressed second FOLLOW press mutated dragon state beyond what the first"
+                    + " press already did — a suppressed press must be a true no-op.");
+            return;
+        }
+
+        var secondMessages = drainSystemChatMessages(player);
+        var notFoundCount = secondMessages.stream()
+                .filter(component -> component.getContents() instanceof TranslatableContents contents
+                        && "dmr.dragon_call.not_found".equals(contents.getKey()))
+                .count();
+        var onCooldownCount = secondMessages.stream()
+                .filter(component -> component.getContents() instanceof TranslatableContents contents
+                        && "dmr.dragon_call.on_cooldown".equals(contents.getKey()))
+                .count();
+
+        if (notFoundCount > 0) {
+            helper.fail("Throttle-suppressed second FOLLOW press emitted dmr.dragon_call.not_found — a false"
+                    + " statement, since the dragon resolved successfully on the first press moments earlier"
+                    + " (all messages seen: " + secondMessages + ")");
+            return;
+        }
+
+        if (onCooldownCount != 1) {
+            helper.fail("Throttle-suppressed second FOLLOW press did not emit the documented"
+                    + " dmr.dragon_call.on_cooldown signal exactly once (all messages seen: " + secondMessages
+                    + ")");
             return;
         }
 
