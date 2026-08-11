@@ -5,6 +5,8 @@ import dmr.DragonMounts.common.capability.DragonOwnerCapability;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler.DragonInstance;
 import dmr.DragonMounts.config.ServerConfig;
+import dmr.DragonMounts.network.packets.DragonCommandPacket;
+import dmr.DragonMounts.network.packets.DragonCommandPacket.Command;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModCapabilities;
 import dmr.DragonMounts.registry.ModEntities;
@@ -2343,6 +2345,388 @@ public class DragonWhistleTests {
         if (!reacquired.get().is(setup.hostile())) {
             helper.fail("ATTACK_TARGET was reacquired but points at a different entity than the seeded hostile: "
                     + reacquired.get());
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    // -----------------------------------------------------------------------------
+    // W8-SUMMON-3 (commit 19): DragonCommandPacket findDragon routing, id-keyed
+    // dispatch, throttle, WANDER cross-dimension guard
+    // -----------------------------------------------------------------------------
+
+    /**
+     * summon-02: SIT/FOLLOW/WANDER/agro commands used to resolve their target dragon
+     * via a bare {@code level.getEntity(instance.getEntityId())} real-UUID lookup — no
+     * fallback at all. This faithfully reproduces summon-02's actual root-cause shape:
+     * a stale {@code entityId} (exactly what W8-SUMMON-2 elsewhere prevents from
+     * recurring, but must still be tolerated for legacy/edge data) paired with the
+     * CORRECT {@code dragonUUID}. Fails on pre-fix HEAD (the naive lookup returns
+     * {@code null}, the whole switch is skipped, the dragon stays sitting); passes
+     * after the fix, which falls through to {@link DragonWhistleHandler#findDragon}'s
+     * dragonUUID-verified widened-radius scan on a fast-path miss.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void followCommandResolvesWithStaleEntityIdBinding(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+        dragon.setOrderedToSit(true);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        // Overwrite the binding with a random, NON-matching entityId but the CORRECT
+        // dragonUUID — setDragon's own DragonInstance(dragon) constructor would have
+        // written the correct entityId, so this deliberately corrupts just that field
+        // to reproduce the stale-binding shape.
+        cap.setDragonInstance(index, new DragonInstance(player.level, UUID.randomUUID(), dragon.getDragonUUID()));
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        new DragonCommandPacket(Command.FOLLOW).handleServer(null, player);
+
+        if (dragon.isOrderedToSit()) {
+            helper.fail("FOLLOW did not resolve the dragon through a stale-entityId binding — the dragon is"
+                    + " still sitting. level.getEntity(randomUUID) must have returned null and the whole switch"
+                    + " was skipped instead of falling through to findDragon.");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Catches a regression that reintroduces an unguarded null-dereference on the
+     * "dragon could not be resolved at all" path. Binds index 0 to a
+     * {@link DragonInstance} whose {@code dragonUUID} matches no live entity anywhere
+     * (neither the stored dimension's exact/widened scans nor the player-proximity
+     * fallback can find it), issues SIT, and asserts no exception propagates.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void followCommandOnUnresolvableDragonDoesNotThrow(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        // Neither entityId nor dragonUUID matches the live dragon (or anything else) —
+        // findDragon must come back empty everywhere, and the "not found" branch must
+        // not NPE.
+        cap.setDragonInstance(index, new DragonInstance(player.level, UUID.randomUUID(), UUID.randomUUID()));
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        try {
+            new DragonCommandPacket(Command.SIT).handleServer(null, player);
+        } catch (Exception e) {
+            helper.fail("SIT on an unresolvable dragon binding threw instead of showing not_found feedback: " + e);
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * constraint-a3: an out-of-range/malformed {@code command} int (raw, unvalidated
+     * client input; the packet's own no-arg constructor defaults it to -1) used to be
+     * fed straight into {@code Command.values()[command]}, throwing
+     * {@code ArrayIndexOutOfBoundsException} on the server's main packet-handling
+     * thread. Asserts the id-keyed {@link Command#resolveCommand} rejection path
+     * handles it gracefully instead.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void commandWithOutOfRangeIdDoesNotCrashServer(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        try {
+            new DragonCommandPacket(999).handleServer(null, player);
+        } catch (Exception e) {
+            helper.fail("An out-of-range command id (999) crashed command processing instead of being rejected"
+                    + " gracefully: " + e);
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * {@code DragonAI#getWanderTarget} strips the {@code GlobalPos}'s dimension and
+     * paths toward the raw {@code BlockPos} unconditionally — arming a WANDER target
+     * in the PLAYER's dimension for a dragon findDragon resolved in a DIFFERENT
+     * dimension would silently mis-path it once it eventually arrives there. Mirrors
+     * {@link #callAcrossDimensions}' changeDimension setup, but never summons the
+     * dragon back — it stays in the Nether, and the WANDER command (issued from the
+     * player's Overworld connection) must be refused rather than arming a
+     * wrong-dimension target.
+     *
+     * <p>
+     * Unlike {@link #callAcrossDimensions}, nothing here ever calls {@code callDragon}
+     * — WANDER never mints a chunk ticket of its own — so the destination chunk's
+     * entity section would never be promoted "visible" for {@code findDragon} to see,
+     * and a {@code succeedWhen} poll would simply time out for a reason unrelated to
+     * the guard under test. Uses the same forced-ticket-then-drain recipe as {@link
+     * #runRecallRefusesOnCrossLevelRealUuidCollision} to promote the destination chunk
+     * synchronously before the dragon ever arrives there.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void wanderCommandIgnoredWhenDragonInDifferentDimension(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        var server = helper.getLevel().getServer();
+        var netherDim = server.getLevel(Level.NETHER);
+        if (netherDim == null) {
+            helper.fail("Nether level is not available");
+            return;
+        }
+
+        // Force the destination chunk to actually become entity-visible BEFORE the
+        // dragon ever arrives there — see runRecallRefusesOnCrossLevelRealUuidCollision's
+        // javadoc for why a plain getChunk() alone is not enough.
+        ChunkPos destChunkPos = new ChunkPos(0, 0);
+        netherDim.getChunkSource().addRegionTicket(TicketType.FORCED, destChunkPos, 0, destChunkPos);
+        try {
+            netherDim.getChunk(0, 0);
+            for (int i = 0; i < 5; i++) {
+                netherDim.getChunkSource().tick(() -> true, true);
+            }
+            while (netherDim.getChunkSource().pollTask()) {
+                // Drain until the queue is empty.
+            }
+
+            var dimensionTransition = new DimensionTransition(
+                    netherDim, new Vec3(0, 0, 0), new Vec3(0, 0, 0), 0, 0, true, DimensionTransition.DO_NOTHING);
+
+            var netherDragon = (TameableDragonEntity) dragon.changeDimension(dimensionTransition);
+            if (netherDragon == null) {
+                helper.fail("changeDimension returned null when moving the dragon to the Nether");
+                return;
+            }
+
+            var found = DragonWhistleHandler.findDragon(player, index);
+            if (found == null) {
+                helper.fail("Dragon not resolvable across dimensions even after forcing the destination chunk"
+                        + " visible — cannot distinguish a broken WANDER guard from a resolution miss");
+                return;
+            }
+
+            // Discard setup packets so only the WANDER command's own feedback (if any)
+            // is counted below. This is the discriminator that actually distinguishes
+            // "the guard explicitly refused" from "resolution silently failed and the
+            // switch was skipped entirely" — both leave hasWanderTarget() false, but
+            // only the FIXED code sends dmr.dragon_call.not_found in either case; the
+            // pre-fix bare-lookup-miss path sends nothing at all.
+            drainSystemChatMessages(player);
+
+            new DragonCommandPacket(Command.WANDER).handleServer(null, player);
+
+            if (found.hasWanderTarget()) {
+                helper.fail("WANDER armed a cross-dimension GlobalPos target instead of being refused with"
+                        + " feedback");
+                return;
+            }
+
+            var messages = drainSystemChatMessages(player);
+            boolean sawNotFound = messages.stream()
+                    .anyMatch(component -> component.getContents() instanceof TranslatableContents contents
+                            && "dmr.dragon_call.not_found".equals(contents.getKey()));
+            if (!sawNotFound) {
+                helper.fail("WANDER did not arm a cross-dimension target, but also sent no"
+                        + " dmr.dragon_call.not_found feedback — this cannot distinguish the guard actually"
+                        + " firing from the pre-fix bare lookup silently skipping the whole switch (all"
+                        + " messages seen: " + messages + ")");
+                return;
+            }
+
+            helper.succeed();
+        } finally {
+            netherDim.getChunkSource().removeRegionTicket(TicketType.FORCED, destChunkPos, 0, destChunkPos);
+        }
+    }
+
+    /**
+     * Positive control for {@link #wanderCommandIgnoredWhenDragonInDifferentDimension}:
+     * the IDENTICAL command, issued against a dragon resolvable in the player's OWN
+     * dimension, must still arm a wander target. Without this, a guard accidentally
+     * inverted (e.g. {@code .equals(...)} flipped to {@code !.equals(...)}) would pass
+     * the cross-dimension refusal test above and still pass the suite, silently
+     * breaking WANDER for the overwhelmingly common same-dimension case.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void wanderCommandArmsTargetWhenDragonInSameDimension(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        new DragonCommandPacket(Command.WANDER).handleServer(null, player);
+
+        if (!dragon.hasWanderTarget()) {
+            helper.fail("Same-dimension WANDER did not arm a wander target — a guard inverted to !equals would"
+                    + " incorrectly refuse this too, and only this positive control would catch it.");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Gate-required (release-blocking): proves the per-player findDragon throttle does
+     * not swallow a legitimate second command. The cheap same-level
+     * {@code level.getEntity(entityId)} fast path is unthrottled — with the binding's
+     * stored {@code entityId} valid throughout (the normal case), two FOLLOW presses
+     * issued back-to-back must BOTH resolve the dragon and BOTH emit their action-bar
+     * feedback. A throttle wrongly applied to the fast path (rather than only to the
+     * expensive findDragon fallback on a fast-path miss) would silently swallow the
+     * second press — reintroducing exactly the silent no-op summon-02 is about.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void twoConsecutiveFollowPressesBothTakeEffect(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+        cap.setPlayerInstance(player);
+
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        // Setup packets (placeNewPlayer's initial sync, moveToCentre, tamedFor's own
+        // feedback, ...) queue chat packets of their own — drain and discard so only
+        // the two FOLLOW presses' own messages are counted below.
+        drainSystemChatMessages(player);
+
+        new DragonCommandPacket(Command.FOLLOW).handleServer(null, player);
+        new DragonCommandPacket(Command.FOLLOW).handleServer(null, player);
+
+        var messages = drainSystemChatMessages(player);
+        var followMessages = messages.stream()
+                .filter(component -> component.getContents() instanceof TranslatableContents contents
+                        && "dmr.command_mode.follow.text".equals(contents.getKey()))
+                .toList();
+
+        if (followMessages.size() != 2) {
+            helper.fail("Two consecutive FOLLOW presses (binding's stored entityId valid throughout, so the"
+                    + " fast path should resolve both, unthrottled) produced " + followMessages.size()
+                    + " dmr.command_mode.follow.text messages instead of 2 — a throttle wrongly applied to the"
+                    + " fast path would silently swallow the second press (all messages seen: " + messages + ")");
             return;
         }
 
