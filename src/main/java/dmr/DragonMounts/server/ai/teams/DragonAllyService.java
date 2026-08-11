@@ -28,6 +28,29 @@ import org.jetbrains.annotations.Nullable;
  * DragonTeamPassivityTests}, the artifact that discharges C4 for this whole area.
  *
  * <p>
+ * <b>One real no-mod delta: same-owner pet-vs-pet.</b> {@link #isTeammateOfOwner} calls
+ * {@code isAllied(candidate, owner)} — candidate FIRST — so its vanilla fast path evaluates
+ * {@code candidate.isAlliedTo(owner)}, not {@code dragon.isAlliedTo(candidate)}. When
+ * {@code candidate} is itself a tamed pet of the SAME owner (owner present in the dragon's
+ * level), {@code TamableAnimal#isAlliedTo}'s owner-delegation hits its {@code entity ==
+ * livingentity} case directly ({@code candidate}'s own owner IS the entity being compared
+ * against) and returns {@code true} unconditionally — this is the vanilla fast path in
+ * {@link #isAllied}, so {@link ServerConfig#DRAGON_TEAM_PASSIVITY} is never even read and
+ * no provider is touched; the behavior is NOT controllable via that flag. The pre-existing
+ * call this replaced, a raw {@code dragon.isAlliedTo(candidate)} (see {@code
+ * Sensor#isEntityAttackable}, attacker-first), is asymmetric the other way (owner-to-pet,
+ * not pet-to-pet) and returns {@code false} for that same pair absent a shared scoreboard
+ * team. Net effect: a tamed dragon calling into {@link #isTeammateOfOwner} (currently:
+ * {@code maybeRetaliate} in {@code DragonAI}, and {@code wantsToAttack} in {@code
+ * DragonCombatComponent}) no longer retaliates against / assists against another pet owned
+ * by the same player WHILE THE OWNER IS ONLINE, where it previously did — this is a genuine,
+ * currently config-unconditional behavior change, not merely the FTB Teams/Open Parties and
+ * Claims delta the two call sites' own javadocs otherwise describe. (The rarer
+ * offline/cross-dimension-owner branch of {@link #isTeammateOfOwner} routes through {@link
+ * #isAlliedByUuid} instead, which DOES require {@code DRAGON_TEAM_PASSIVITY} plus an
+ * available provider for the equivalent same-UUID pairing.)
+ *
+ * <p>
  * <b>Pet delegation.</b> Mirrors vanilla {@code TamableAnimal#isAlliedTo}'s own owner
  * delegation: a tamed pet normalizes to its owner's identity on either side of the
  * comparison, so a teammate's tamed dragon reads as allied via this path too — closing
@@ -121,13 +144,40 @@ public final class DragonAllyService {
     private static boolean isAlliedByUuid(LivingEntity serverSource, @Nullable UUID a, @Nullable UUID b) {
         if (!ServerConfig.DRAGON_TEAM_PASSIVITY) return false;
         if (a == null || b == null) return false;
-        if (a.equals(b)) return true;
 
         MinecraftServer server = serverSource.getServer();
         if (server == null) return false;
 
         logAvailabilityOnce();
+
+        // "Same normalized owner" (e.g. (owner, ownedDragon) in that operand order, or two
+        // of the same owner's pets) only short-circuits to true when a mod provider is
+        // actually available. With NO team mod installed — the shipping default, and the
+        // configuration W8-TEAMS-1-C4PARITY's providers-empty condition models — this must
+        // fall all the way back to vanilla, which does NOT recognize that pairing on its
+        // own (TamableAnimal#isAlliedTo's owner delegation is one-directional: a pet reads
+        // as allied to its owner, but Player#isAlliedTo has no reciprocal pet-ownership
+        // awareness). Gating on provider availability, not merely a non-empty #providers
+        // list, matters for the real (non-test) no-mod-installed case too: the production
+        // #providers list is never empty (FtbTeamsProvider/OpacProvider are always
+        // installed), only unavailable.
+        if (a.equals(b)) {
+            return anyProviderAvailable();
+        }
+
         return resolveCached(server.getTickCount(), providers, server, a, b);
+    }
+
+    /** Fail-closed liveness scan mirroring {@link #logAvailabilityOnce()}'s own guard. */
+    private static boolean anyProviderAvailable() {
+        for (TeamProvider provider : providers) {
+            try {
+                if (provider.isAvailable()) return true;
+            } catch (RuntimeException | LinkageError e) {
+                // fail closed for this provider only; keep scanning the rest
+            }
+        }
+        return false;
     }
 
     /**

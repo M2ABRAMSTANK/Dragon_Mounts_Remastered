@@ -563,9 +563,15 @@ public class DragonAI {
      * inline from {@code DragonCombatComponent#hurt}) is the dragon's IMMEDIATE, same-tick
      * reaction to being hit — {@link Sensor#isEntityAttackable} already routes through
      * {@code TargetingConditions#test}, which evaluates vanilla {@code isAlliedTo}, so a
-     * vanilla-scoreboard teammate was already spared here before this fix; the real delta
-     * this gate adds is the FTB Teams/Open Parties and Claims path, which had zero
-     * allegiance awareness at all until now.
+     * vanilla-scoreboard teammate was already spared here before this fix. The FTB
+     * Teams/Open Parties and Claims path is the main delta this gate adds (zero allegiance
+     * awareness there before now), but it is not the only one: {@link DragonAllyService
+     * #isTeammateOfOwner} also makes the dragon spare another pet owned by the SAME player
+     * (while that owner is online) — a behavior change this method inherits UNCONDITIONALLY,
+     * not gated by {@code DRAGON_TEAM_PASSIVITY} and present even with no team mod
+     * installed — see {@code DragonAllyService}'s class javadoc ("One real no-mod delta")
+     * for why the operand order {@link DragonAllyService#isTeammateOfOwner} calls into makes
+     * that happen.
      *
      * @param dragon The dragon entity
      * @param target The potential retaliation target

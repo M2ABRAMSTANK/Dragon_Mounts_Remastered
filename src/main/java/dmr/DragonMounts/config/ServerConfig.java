@@ -253,7 +253,13 @@ public class ServerConfig {
                 "Tamed dragons will never attack (or continue attacking) a player who is teamed with",
                 "the dragon's owner via FTB Teams or Open Parties and Claims, even if that player",
                 "accidentally hits the dragon or the owner attacks them first.",
-                "Vanilla scoreboard-team allies are always protected regardless of this flag."
+                "Vanilla scoreboard-team allies are always protected regardless of this flag.",
+                "Side effect (NOT controlled by this flag, cannot be disabled here): a tamed dragon",
+                "will no longer retaliate against, or assist its owner against, another pet owned by",
+                "that SAME player while the owner is present, matching vanilla's own owner-delegated",
+                "isAlliedTo semantics for tamed animals. This one case applies even with this setting",
+                "off and with no team mod installed; only the rare offline/cross-dimension-owner",
+                "variant of the same pairing is gated by this flag."
             },
             category = "behavior")
     public static boolean DRAGON_TEAM_PASSIVITY = true;

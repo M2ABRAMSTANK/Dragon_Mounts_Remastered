@@ -112,6 +112,16 @@ abstract class DragonCombatComponent extends DragonBreedableComponent {
      * {@code canUse()} only calls {@code this.canAttack(livingentity, HURT_BY_TARGETING)}),
      * so it gets its own thin {@code canUse()}-gated subclass instead — see {@code
      * DragonHurtByTargetGoal}.
+     *
+     * <p>
+     * Not purely an FTB Teams/Open Parties and Claims addition: {@link
+     * DragonAllyService#isTeammateOfOwner} also refuses a target that is another pet owned
+     * by the SAME player as this dragon's owner (while that owner is online) —
+     * UNCONDITIONALLY, not gated by {@code DRAGON_TEAM_PASSIVITY}, and with no team mod
+     * installed or provider ever touched — see that method's class javadoc ("One real
+     * no-mod delta") for the operand-order reason why. So a tamed dragon no longer assists
+     * its owner against, nor is stirred to defend the owner against, another of the owner's
+     * own pets, where it previously did.
      */
     public boolean wantsToAttack(LivingEntity target, LivingEntity owner) {
         if (DragonAllyService.isTeammateOfOwner(getDragon(), target)) {

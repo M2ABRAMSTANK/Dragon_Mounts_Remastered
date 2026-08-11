@@ -86,6 +86,21 @@ public class DragonTeamPassivityTests {
         };
     }
 
+    /** Mirrors the real shipping default: a configured provider whose mod isn't installed. */
+    private static TeamProvider unavailableProvider() {
+        return new TeamProvider() {
+            @Override
+            public boolean isAvailable() {
+                return false;
+            }
+
+            @Override
+            public boolean areTeammates(MinecraftServer server, UUID x, UUID y) {
+                throw new AssertionError("areTeammates must not be called when isAvailable() is false");
+            }
+        };
+    }
+
     /**
      * {@code W8-TEAMS-1-C4PARITY}: with the provider list empty AND {@code
      * DRAGON_TEAM_PASSIVITY} false, {@code DragonAllyService.isAllied(a, b)} must equal
@@ -253,6 +268,88 @@ public class DragonTeamPassivityTests {
             }
             if (!DragonAllyService.isTeammateOfOwner(dragonA, dragonB)) {
                 helper.fail("isTeammateOfOwner must also recognize the other owner's tamed dragon as a teammate");
+                return;
+            }
+        } finally {
+            DragonAllyService.setProvidersForTest(previousProviders);
+            ServerConfig.DRAGON_TEAM_PASSIVITY = previousPassivity;
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Adversarial-review fix-round addition: {@code DragonAllyService#isAllied}'s
+     * {@code a.equals(b)} short-circuit (two entities that normalize to the SAME owner
+     * UUID — here, two dragons independently tamed by one owner) must NOT diverge from
+     * vanilla when providers are empty, matching {@code W8-TEAMS-1-C4PARITY}'s intent for
+     * this pairing. Compares the dragons DIRECTLY ({@code isAllied(dragonA, dragonB)}, not
+     * owner-mediated), which is deliberately the one shape that bypasses the vanilla
+     * {@code a.isAlliedTo(b)} fast path entirely — {@code dragonA.isAlliedTo(dragonB)} is
+     * {@code false} because {@code TamableAnimal#isAlliedTo}'s owner-delegation only
+     * special-cases {@code entity == livingentity} (i.e. comparing a pet directly against
+     * ITS OWN owner), not two sibling pets against each other — so this is the one call
+     * shape that actually exercises {@code DragonAllyService#isAlliedByUuid}'s same-UUID
+     * branch rather than the vanilla fast path resolving it first.
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void sameOwnerPetPairMatchesVanillaWhenNoProviderIsAvailable(ExtendedGameTestHelper helper) {
+        var owner = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        owner.moveToCentre();
+
+        var dragonA = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragonA.setBreed(DragonBreedsRegistry.getDefault());
+        dragonA.tamedFor(owner, true);
+
+        var dragonB =
+                helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS.offset(new BlockPos(4, 0, 4)));
+        dragonB.setBreed(DragonBreedsRegistry.getDefault());
+        dragonB.tamedFor(owner, true);
+
+        if (dragonA.isAlliedTo(dragonB)) {
+            helper.fail("Precondition violated: vanilla isAlliedTo must NOT recognize two sibling pets of the same"
+                    + " owner as allied to each other — otherwise this test cannot distinguish the fast path from"
+                    + " the mod-provider path");
+            return;
+        }
+
+        var previousProviders = DragonAllyService.providers;
+        boolean previousPassivity = ServerConfig.DRAGON_TEAM_PASSIVITY;
+        try {
+            // No provider available at all (empty list) — must match vanilla (false), not
+            // trivially short-circuit true just because both normalize to the same owner.
+            DragonAllyService.setProvidersForTest(List.of());
+            ServerConfig.DRAGON_TEAM_PASSIVITY = true;
+
+            if (DragonAllyService.isAllied(dragonA, dragonB)) {
+                helper.fail("isAllied(dragonA, dragonB) must match vanilla (false) for two sibling pets of the same"
+                        + " owner when no team-mod provider is available — the same-owner-UUID short-circuit must"
+                        + " not fire on its own");
+                return;
+            }
+
+            // A provider that is merely present-but-unavailable (mirrors the real shipping
+            // default of FtbTeamsProvider/OpacProvider with neither mod installed) must
+            // behave identically to an empty list.
+            DragonAllyService.setProvidersForTest(List.of(unavailableProvider()));
+
+            if (DragonAllyService.isAllied(dragonA, dragonB)) {
+                helper.fail("isAllied(dragonA, dragonB) must match vanilla (false) when the configured providers are"
+                        + " all unavailable (mod not installed), not merely when the list is literally empty");
+                return;
+            }
+
+            // Once a provider IS available, the same-owner-UUID short-circuit is allowed to
+            // fire — proves the gate added by the fix-round is a real, live gate rather than
+            // a permanent no-op that would silently disable the pairing forever.
+            DragonAllyService.setProvidersForTest(List.of(stubTeammatesOf(owner.getUUID(), owner.getUUID())));
+
+            if (!DragonAllyService.isAllied(dragonA, dragonB)) {
+                helper.fail("isAllied(dragonA, dragonB) must recognize two of the same owner's pets as allied once a"
+                        + " team-mod provider is actually available — otherwise the availability gate added by the"
+                        + " fix-round permanently disabled this pairing instead of merely gating it");
                 return;
             }
         } finally {
@@ -963,15 +1060,35 @@ public class DragonTeamPassivityTests {
     }
 
     /**
-     * {@code W8-TEAMS-3}/{@code T3-S6} edge case: with ONLY a teammate in the swing arc
-     * (no real target), the swing must whiff harmlessly — {@code target} resolves to
-     * {@code null}, {@code doHurtTarget} is never called, and no exception is thrown
-     * (verifies the null-target early-return path).
+     * {@code W8-TEAMS-3}/{@code T3-S6} edge case: with ONLY a teammate's tamed pet in the
+     * swing arc (no real target), the swing must whiff harmlessly — {@code target}
+     * resolves to {@code null} because the selector's {@code DragonAllyService.isAllied}
+     * call normalizes the pet to its owner's UUID (mirroring vanilla {@code
+     * TamableAnimal#isAlliedTo}'s own delegation), so {@code doHurtTarget} is never called
+     * and no exception is thrown (verifies the null-target early-return path).
+     *
+     * <p>
+     * Uses a tamed {@link net.minecraft.world.entity.animal.Wolf} owned by the teammate,
+     * NOT a second {@code GameTestPlayer}, as the in-arc entity: {@code GameTestPlayer}'s
+     * health can never be asserted on here (see the sibling test's javadoc above for why —
+     * the mock framework silently no-ops incoming damage), which made an earlier version of
+     * this test unable to ever fail regardless of whether the teammate-skip logic worked.
+     * A tamed pet takes real damage from {@code LivingEntity#hurt}, so {@code
+     * wolf.getHealth()} is a real, falsifiable assertion — one that additionally exercises
+     * {@link DragonAllyService}'s pet-normalizing path (a teammate's tamed pet, not just the
+     * teammate themselves, standing in the swing arc), which no other test in this class
+     * covers. Confirmed this is provably red on the pre-fix raw {@code
+     * !s.isAlliedTo(player)} selector: unlike a tamed dragon (which recurses through {@code
+     * TamableAnimal#isAlliedTo} on both sides), a vanilla {@code Wolf} owned by an unteamed
+     * player is NOT vanilla-allied to that player's teammate — {@code wolf.isAlliedTo(owner)}
+     * delegates to {@code teammate.isAlliedTo(owner)}, which is {@code false} with no shared
+     * scoreboard team — so the raw selector would include the wolf as a real target and this
+     * test would fail with it undamaged after the swing.
      */
     @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
     @GameTest
     @TestHolder
-    public static void riddenMeleeSwingWhiffsWhenOnlyTeammateInArc(ExtendedGameTestHelper helper) {
+    public static void riddenMeleeSwingWhiffsWhenOnlyTeammatesPetInArc(ExtendedGameTestHelper helper) {
         var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
         dragon.setBreed(DragonBreedsRegistry.getDefault());
 
@@ -980,6 +1097,9 @@ public class DragonTeamPassivityTests {
         owner.yBodyRot = 0f;
         var teammate = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
         teammate.moveTo(dragon.getX(), dragon.getY(), dragon.getZ() + 5);
+        var teammatePet = helper.spawn(EntityType.WOLF, DMRTestConstants.TEST_POS);
+        teammatePet.moveTo(dragon.getX(), dragon.getY(), dragon.getZ() + 5);
+        teammatePet.tame(teammate);
 
         dragon.tamedFor(owner, true);
 
@@ -993,6 +1113,8 @@ public class DragonTeamPassivityTests {
         }
         owner.yBodyRot = 0f;
 
+        float petHealthBefore = teammatePet.getHealth();
+
         var previousProviders = DragonAllyService.providers;
         boolean previousPassivity = ServerConfig.DRAGON_TEAM_PASSIVITY;
         try {
@@ -1001,8 +1123,9 @@ public class DragonTeamPassivityTests {
 
             new DragonAttackPacket(dragon.getId()).handle(null, owner);
 
-            if (teammate.getHealth() < teammate.getMaxHealth()) {
-                helper.fail("Ridden melee swing damaged the only entity in arc, a teammate");
+            if (teammatePet.getHealth() < petHealthBefore) {
+                helper.fail("Ridden melee swing damaged the only entity in arc, a teammate's tamed pet — the"
+                        + " pet-normalizing isAllied path did not skip it");
                 return;
             }
         } finally {
