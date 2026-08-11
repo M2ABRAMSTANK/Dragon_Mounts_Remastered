@@ -1276,12 +1276,18 @@ public class PathNavigationTests {
      * Kept deterministic per C7 (the gate's concern that a widened search radius could
      * exhaust the node-visit budget and silently degrade to a terrain-dependent
      * best-effort path): the corridor is a straight, fully open flight lane with zero
-     * obstacles, so the number of nodes PathFinder actually needs to visit is small
-     * relative to the {@code 2560}-node budget {@link PathfindingRulesTests
-     * #visitedNodeBudgetCoversWidenedSearchRadiusWithComfortableMargin} pins as
-     * comfortably sufficient — this test proves the RADIUS widens far enough to reach;
-     * that sibling unit test proves the BUDGET doesn't independently cap the search
-     * first.
+     * obstacles, so the number of nodes PathFinder actually needs to visit to reach a
+     * 45-block target along it is small relative to the {@code Mth.floor(32 * 16) * 5f =
+     * 2560}-node budget fixed once at {@code PathNavigation} construction (this dragon's
+     * default {@code BASE_FOLLOW_RANGE = 32} attribute, scaled by this class's own
+     * {@code setMaxVisitedNodesMultiplier(5f)}) — a real {@code PathFinder} run against
+     * that real, unmocked budget reaching the target here is itself the proof that the
+     * widened RADIUS does not exhaust the BUDGET first; no separate unit test is needed
+     * or exists to pin that number independently (a prior attempt at one compared a node
+     * count against a distance via an invented scale factor, was dimensionally
+     * meaningless, and was deleted — see {@code PathfindingRulesTests}'s javadoc at the
+     * anchor formerly named
+     * {@code visitedNodeBudgetCoversWidenedSearchRadiusWithComfortableMargin}).
      *
      * <p>
      * Failure mode caught: pre-fix, {@code createPath} either returns {@code null} or a

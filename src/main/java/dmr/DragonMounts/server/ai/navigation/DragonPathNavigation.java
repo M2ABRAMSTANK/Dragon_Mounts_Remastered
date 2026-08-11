@@ -96,9 +96,10 @@ public class DragonPathNavigation extends FlyingPathNavigation {
     // boolean,int,float)'s `i = (int)(followRange + regionOffset)`), so pinning 64
     // globally would move EVERY pathfind — including a 5-block one — from vanilla's
     // ~±40 (~6x6 chunk) snapshot to ~±72 (~10x10 chunk), for every dragon, on every
-    // pathfind, on a live server. A request whose nearest target is already within the
-    // live attribute's range is unaffected (clamp floors at attributeValue); only a
-    // genuinely distant target pays for the wider snapshot.
+    // pathfind, on a live server. A request whose nearest target is within
+    // (attributeValue - FOLLOW_RANGE_REQUEST_MARGIN) of the dragon is unaffected (clamp
+    // floors at attributeValue, e.g. inside 24 blocks at the default 32 attribute); only
+    // a genuinely distant target pays for the wider snapshot.
     //
     // Does NOT affect maxVisitedNodes: that budget is fixed once at construction
     // (PathNavigation's constructor: `Mth.floor(mob.getAttributeValue(FOLLOW_RANGE) *
@@ -233,6 +234,28 @@ public class DragonPathNavigation extends FlyingPathNavigation {
     // not a safe way to address it; a future fix should be a BOUNDED prefix trim
     // restricted to `index < path.getNextNodeIndex()` (nodes strictly already passed),
     // never advancing past the current waypoint.
+    // FIX-ROUND (W8-PF2 gate follow-up): is the DMR same-target reuse throttle above
+    // (createPath's `lastPathCreationDelta < TICKS_BETWEEN_PATH_CREATIONS` gate) still
+    // worth keeping now that vanilla's own PathNavigation already caches same-target
+    // paths (`this.path != null && !this.path.isDone() && targets.contains(this.targetPos)`,
+    // decompiled PathNavigation.java:162)? KEPT — verified against decompiled source
+    // that vanilla's cache does not merely fail to *cover* the walk→fly retry below;
+    // it actively *pre-empts* it. When the walk attempt at line ~206 returns a
+    // non-reaching Path, PathFinder.reconstructPath still builds that Path targeting the
+    // REQUESTED BlockPos even on the non-reaching branch (decompiled PathFinder.java:119,
+    // :154), so PathNavigation.createPath(Set,int,boolean,int,float)'s
+    // `this.targetPos = path.getTarget()` (PathNavigation.java:172) now equals `pos`.
+    // The very next line here calls `super.createPath(pos, accuracy)` for the flying
+    // retry — which re-enters vanilla's own gate above with `targets.contains(this.targetPos)`
+    // now true, so vanilla hands back the stale non-reaching `this.path` from the WALK
+    // attempt instead of computing the flight path this method exists to produce. This
+    // is a genuine pre-existing bug (the double-super.createPath structure predates wave
+    // 8; unrelated to and not amplified by this cluster's changes — if anything commit
+    // 8's widened followRange makes the walk attempt reach more often, reducing
+    // exposure), tracked on the fork's backlog rather than fixed here since it is out of
+    // this cluster's scope. DMR's own throttle is unaffected by it (it gates entry to
+    // createPath, not this retry), so it remains the only thing here actually protecting
+    // against the null-return failure mode W8-PF2 fixed — hence: kept.
     private Path createPathWithFlyingAllowed(BlockPos pos, int accuracy) {
         dragonNodeEvaluator.allowFlying = true;
         return super.createPath(pos, accuracy);
