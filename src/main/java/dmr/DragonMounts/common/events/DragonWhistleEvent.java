@@ -5,6 +5,7 @@ import dmr.DragonMounts.common.handlers.DragonWhistleHandler;
 import dmr.DragonMounts.common.handlers.DragonWhistleHandler.DragonInstance;
 import dmr.DragonMounts.config.ServerConfig;
 import dmr.DragonMounts.network.packets.CompleteDataSync;
+import dmr.DragonMounts.network.packets.DragonCommandPacket;
 import dmr.DragonMounts.network.packets.DragonNBTSync;
 import dmr.DragonMounts.network.packets.DragonRespawnDelayPacket;
 import dmr.DragonMounts.registry.ModCapabilities;
@@ -50,6 +51,10 @@ public class DragonWhistleEvent {
         // reset — clear both so a leftover entry from a previous session can never
         // fire a phantom summon or reclaim on the next one.
         DragonWhistleHandler.clearTransientState();
+        // Fix-round (command-packet-tests cluster): DragonCommandPacket's
+        // LAST_FIND_DRAGON_TICK is the same shape of hazard — an absolute
+        // level.getGameTime() stamp in a static map — and gets the same treatment.
+        DragonCommandPacket.clearThrottleState();
     }
 
     @SubscribeEvent

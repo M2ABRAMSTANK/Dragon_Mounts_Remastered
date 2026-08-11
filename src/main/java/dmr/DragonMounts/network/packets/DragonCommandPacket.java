@@ -114,13 +114,40 @@ public class DragonCommandPacket extends AbstractMessage<DragonCommandPacket> {
      * sweeps would otherwise run — is rate-limited. Unlike WHISTLE, this packet has no
      * cooldown between decode and use, so without this a modified client could turn
      * every SIT/FOLLOW/WANDER/agro press into a main-thread cost amplifier at packet
-     * rate. Keyed by player UUID; entries are small (one long per player who has ever
-     * missed the fast path) and simply age out — no logout hook needed for a map this
-     * cheap.
+     * rate.
+     *
+     * <p>
+     * Fix-round (command-packet-tests cluster): keyed by player UUID against an
+     * ABSOLUTE {@code level.getGameTime()} stamp, same as {@code
+     * DragonWhistleHandler}'s {@code DEFERRED_SUMMONS}/{@code PENDING_RECLAIMS} before
+     * Wave 5 review fix #5 — and this map has the identical failure mode: nothing
+     * previously removed an entry, so a stamp from one world/session compared against
+     * a much smaller {@code getGameTime()} in a later one (e.g. single-player quitting
+     * world A at gameTime 1,000,000 and loading world B, same JVM, same player UUID,
+     * gameTime ~0) produces a large NEGATIVE delta that is always {@code <
+     * FIND_DRAGON_THROTTLE_TICKS}, silently disabling the findDragon fallback for that
+     * player until world B's own clock catches up — re-breaking the exact invariant
+     * Wave 5 already codified ("absolute tick-count deadlines ... don't survive a
+     * server restart's tick counter reset"). Fixed the same way that fix was: cleared
+     * from {@link DragonWhistleHandler#clearTransientState()} (via {@link
+     * #clearThrottleState()}, called from the same {@code ServerStoppingEvent} hook),
+     * and the comparison below now also tolerates a clock that goes backwards
+     * (treated as "throttle window elapsed") for any entry that survives regardless.
      */
     private static final ConcurrentHashMap<UUID, Long> LAST_FIND_DRAGON_TICK = new ConcurrentHashMap<>();
 
     private static final int FIND_DRAGON_THROTTLE_TICKS = 10;
+
+    /**
+     * Fix-round (command-packet-tests cluster): clears {@link #LAST_FIND_DRAGON_TICK}
+     * so no stamp from one session/world can outlive it. Called from {@code
+     * DragonWhistleEvent#onServerStopping} alongside {@link
+     * DragonWhistleHandler#clearTransientState()} — see that hook and this class's
+     * throttle javadoc for the failure this prevents.
+     */
+    public static void clearThrottleState() {
+        LAST_FIND_DRAGON_TICK.clear();
+    }
 
     @Override
     public void handleServer(IPayloadContext context, ServerPlayer player) {
@@ -183,20 +210,40 @@ public class DragonCommandPacket extends AbstractMessage<DragonCommandPacket> {
         // javadoc) so a modified client spamming this packet cannot turn every press
         // into two 100-block entity sweeps per tick.
         TameableDragonEntity dragon = null;
+        // Fix-round (command-packet-tests cluster): distinguishes "the fallback ran and
+        // genuinely found nothing" from "the fallback was suppressed by the throttle" —
+        // the two must not share a message (see below).
+        boolean throttled = false;
         if (level.getEntity(instance.getEntityId()) instanceof TameableDragonEntity fastDragon) {
             dragon = fastDragon;
         } else {
             long now = level.getGameTime();
             var lastFindDragonTick = LAST_FIND_DRAGON_TICK.get(player.getUUID());
-            if (lastFindDragonTick == null || now - lastFindDragonTick >= FIND_DRAGON_THROTTLE_TICKS) {
+            // Fix-round: `now < lastFindDragonTick` (clock went backwards — a new
+            // world/session reusing this same static map) is treated the same as the
+            // throttle window having elapsed, never as "still throttled".
+            if (lastFindDragonTick == null || now < lastFindDragonTick || now - lastFindDragonTick
+                    >= FIND_DRAGON_THROTTLE_TICKS) {
                 LAST_FIND_DRAGON_TICK.put(player.getUUID(), now);
                 dragon = DragonWhistleHandler.findDragon(player, index);
+            } else {
+                throttled = true;
             }
         }
 
         if (dragon == null) {
-            player.displayClientMessage(
-                    Component.translatable("dmr.dragon_call.not_found").withStyle(ChatFormatting.RED), true);
+            // Fix-round (command-packet-tests cluster): a throttle-suppressed press
+            // never actually attempted resolution — the dragon may well still exist and
+            // resolved successfully as recently as FIND_DRAGON_THROTTLE_TICKS ago.
+            // Reporting dmr.dragon_call.not_found here would be a false statement (the
+            // gate's requiredChange #3: a suppressed second press must be "a documented
+            // no-op with feedback, never a silent one" — and that feedback must not
+            // misdescribe the outcome). Reuses dmr.dragon_call.on_cooldown, the same key
+            // DragonWhistleHandler#callDragon's alreadyPending re-press already uses for
+            // "something is already in progress/rate-limited, wait a moment" — no new
+            // lang key needed, so this stays C6-safe for .2/.3 clients.
+            var key = throttled ? "dmr.dragon_call.on_cooldown" : "dmr.dragon_call.not_found";
+            player.displayClientMessage(Component.translatable(key).withStyle(ChatFormatting.RED), true);
             return;
         }
 
