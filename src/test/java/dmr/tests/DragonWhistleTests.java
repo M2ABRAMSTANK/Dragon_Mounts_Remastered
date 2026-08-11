@@ -1130,6 +1130,96 @@ public class DragonWhistleTests {
     }
 
     /**
+     * Fix-round (summon-behavior cluster) requiredChange #3: {@link
+     * #fortyBlockSummonUsesTeleportBranchNotWalkBranch} covers the DISTANCE half of
+     * commit 16's threshold flip, but with {@code ServerConfig.SUMMON_WALK_MAX_DISTANCE}
+     * left at its default (0.0 = "derive from follow range"), that test passes
+     * identically whether the call site reads {@code ServerConfig.SUMMON_WALK_MAX_DISTANCE}
+     * or a literal {@code 0.0} — the C8 escape hatch's wiring itself is uncovered
+     * (same "helper covered, call site not" shape the previous review round rejected).
+     *
+     * <p>
+     * This test sets {@code ServerConfig.SUMMON_WALK_MAX_DISTANCE = 64.0} (restoring
+     * the pre-wave-8 64-block radius) in a try/finally, repeats the identical 40-block
+     * vertical setup, and asserts the OPPOSITE outcome: the dragon does NOT teleport
+     * (walk branch taken, separation stays ~40). {@code
+     * ModConstants.DragonConstants#walkSummonMaxDistance(64, 32)} resolves to {@code
+     * min(64, pathfindSearchRadius(32)) = min(64, 64) = 64}, so 40 sits inside the
+     * walk band under this override. RED-provable: a call site passing a literal
+     * {@code 0.0} instead of {@code ServerConfig.SUMMON_WALK_MAX_DISTANCE} would still
+     * resolve to the same default-derived 32-block threshold regardless of this
+     * override, and 40 &gt; 32 would teleport — this test fails on that variant and
+     * passes only when the config field is actually read at the call site.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void summonWalkMaxDistanceOverrideExtendsWalkBranch(ExtendedGameTestHelper helper) {
+        double previous = ServerConfig.SUMMON_WALK_MAX_DISTANCE;
+        try {
+            ServerConfig.SUMMON_WALK_MAX_DISTANCE = 64.0;
+
+            var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+            player.moveToCentre();
+
+            var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+            dragon.setBreed(DragonBreedsRegistry.getDefault());
+            dragon.tamedFor(player, true);
+
+            var index = 0;
+            DragonWhistleHandler.setDragon(player, dragon, index);
+
+            var cap = player.getData(ModCapabilities.PLAYER_CAPABILITY);
+            cap.setPlayerInstance(player);
+
+            // getDragonSummonIndex (callDragon's own gate) requires the player to
+            // actually be HOLDING a whistle whose color id matches the bound index.
+            for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+                if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                    break;
+                }
+            }
+
+            // Identical VERTICAL displacement to fortyBlockSummonUsesTeleportBranchNotWalkBranch
+            // — same chunk column, no gravity concern (never ticked before the
+            // synchronous callDragon call below).
+            dragon.setNoGravity(true);
+            dragon.setPos(dragon.getX(), dragon.getY() + 40, dragon.getZ());
+
+            boolean called = DragonWhistleHandler.callDragon(player);
+            if (!called) {
+                helper.fail("callDragon reported failure for a plain, uncontested 40-block summon");
+                return;
+            }
+
+            var resolved = DragonWhistleHandler.findDragon(player, index);
+            if (resolved != dragon) {
+                helper.fail("callDragon did not resolve back to the original dragon (a deferred-summon"
+                        + " resolution miss) — cannot distinguish a broken walk branch from a resolution"
+                        + " miss until this precondition holds");
+                return;
+            }
+
+            double distance = dragon.position().distanceTo(player.position());
+            if (distance < 30) {
+                helper.fail("A 40-block summon with SUMMON_WALK_MAX_DISTANCE=64 teleported the dragon"
+                        + " (distance after callDragon was " + distance + ", expected ~40) — the config"
+                        + " override is not reaching the call site (walk/teleport decision is reading a"
+                        + " literal default instead of ServerConfig.SUMMON_WALK_MAX_DISTANCE).");
+                return;
+            }
+
+            helper.succeed();
+        } finally {
+            ServerConfig.SUMMON_WALK_MAX_DISTANCE = previous;
+        }
+    }
+
+    /**
      * W8-SUMMON-2 (null-UUID hardening) regression: {@code
      * DragonOwnerCapability#isBoundToWhistle} must not NPE when one of the player's
      * {@link DragonInstance} entries has a null dragonUUID (a legacy entry that

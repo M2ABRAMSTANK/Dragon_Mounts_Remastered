@@ -87,7 +87,11 @@ public class TameableDragonEntity extends AbstractDragonEntity {
      * connect-time compatibility risk (C3). NOT synced to the client (server-only AI
      * bookkeeping) and NOT persisted via addAdditionalSaveData/readAdditionalSaveData
      * — a grace window has no meaning across a save/load boundary, and 0 (the
-     * post-load default) correctly means "no active grace" on every fresh load.
+     * post-load default) correctly means "no active grace" on every fresh load. Note
+     * that {@code Entity#changeDimension} (cross-dimension summon) IS such a boundary
+     * — it replaces the entity instance via an NBT round-trip — so {@code
+     * DragonWhistleHandler#summonExistingDragon} deliberately re-arms this field on
+     * the arrived entity after that call rather than relying on it surviving the trip.
      */
     private long whistleRecallGraceUntilTick = 0L;
 

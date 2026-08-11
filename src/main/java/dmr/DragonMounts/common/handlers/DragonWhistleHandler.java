@@ -605,7 +605,10 @@ public class DragonWhistleHandler {
         // so a bare erase is undone by StartAttacking on the very next brain tick
         // whenever the hostile is still sensed and valid. The grace window (see
         // DragonAI#createAttackInitiationBehavior) closes THAT gap uniformly for all
-        // three branches below (cross-dimension, walk, teleport) — but it is scoped
+        // three branches below (cross-dimension, walk, teleport — the cross-dimension
+        // branch re-arms the window on the arrived entity below, since
+        // Entity#changeDimension replaces the entity instance via an NBT round-trip
+        // and this transient field does not travel with it) — but it is scoped
         // to StartAttacking/NEAREST_ATTACKABLE only. It does NOT gate
         // createTargetAcquisitionBehavior, the Activity.IDLE priority-0 behavior that
         // wraps OwnerHurtByTargetGoal/OwnerHurtTargetGoal/HurtByTargetGoal — those
@@ -651,6 +654,15 @@ public class DragonWhistleHandler {
             }
 
             dragon = movedDragon;
+            // Fix-round required change #1 (summon-behavior cluster): changeDimension
+            // builds a brand-new entity via getType().create()+restoreFrom (an NBT
+            // round-trip), and whistleRecallGraceUntilTick is deliberately NOT part of
+            // that NBT (see its javadoc) — so the field armed above at line ~623 lives
+            // only on the entity instance that no longer exists past this point. Without
+            // this re-arm, isInWhistleRecallGrace() is false for the entire window on
+            // every cross-dimension summon, silently defeating the "uniformly for all
+            // three branches" claim above.
+            dragon.setWhistleRecallGraceUntilTick(dragon.level().getGameTime() + WHISTLE_RECALL_GRACE_TICKS);
             // Final positioning through teleportTo — tracker-correct, unlike raw
             // position mutation (#111's invisible-dragon fix path).
             dragon.teleportTo(
@@ -683,7 +695,15 @@ public class DragonWhistleHandler {
             // emits exactly ONE terminal player signal (cross-dimension/teleport: the
             // dragon visibly appearing; refused mint: dmr.dragon_call.not_found; walk:
             // this message).
-            player.displayClientMessage(Component.translatable("dmr.dragon_call.walking"), true);
+            // Fix-round required change #2 (summon-behavior cluster, C6): this is a
+            // brand-new wave-8 lang key. A .2/.3 client resolves translation keys from
+            // its OWN jar, so on a wave-8 server serving old clients (C6) the literal
+            // key string would render instead of text. translatableWithFallback embeds
+            // the fallback text directly in the packet, so old clients render it
+            // correctly even without the key in their local lang file.
+            player.displayClientMessage(
+                    Component.translatableWithFallback("dmr.dragon_call.walking", "Your dragon is on its way!"),
+                    true);
 
             DMR.LOGGER.debug(
                     "Making dragon: {} follow player: {}",
