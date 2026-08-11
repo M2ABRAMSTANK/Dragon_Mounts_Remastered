@@ -1,6 +1,7 @@
 package dmr.tests;
 
 import dmr.DMRTestConstants;
+import dmr.DragonMounts.network.packets.DismountDragonPacket;
 import dmr.DragonMounts.registry.DragonArmorRegistry;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModEntities;
@@ -603,6 +604,60 @@ public class DragonTests {
                 helper.fail("Player is still riding dragon");
             }
         });
+    }
+
+    /**
+     * W8-SYNC-2 regression: {@code DismountDragonPacket#handle} must only write
+     * {@code cap.shouldDismount} when the player is ACTUALLY controlling a dragon.
+     * Simulates the race the fix closes: a server-side dismount happens through some
+     * OTHER path (dragon death, a third-party mod, etc. — modelled here with a plain
+     * {@code player.stopRiding()}), and then a late/stray
+     * {@code DismountDragonPacket(playerId, true)} — sent by the client before that
+     * happened, but arriving after — reaches {@code handle()}. Pre-fix, the
+     * unconditional write left {@code cap.shouldDismount} stuck {@code true} forever
+     * (it is serialized into the player attachment), which vanilla's own mount check
+     * uses to bounce every later mount attempt.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void dismountFlagNotSetForPlayerNoLongerControllingADragon(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.SADDLE));
+        dragon.interact(player, InteractionHand.MAIN_HAND);
+
+        player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        dragon.interact(player, InteractionHand.MAIN_HAND);
+
+        if (!player.isPassenger()) {
+            helper.fail("Setup failed: player never mounted the dragon");
+            return;
+        }
+
+        // Server-side dismount through a path OTHER than DismountDragonPacket — this
+        // itself already correctly leaves cap.shouldDismount false via
+        // EntityDismountMixin's stopRiding() inject.
+        player.stopRiding();
+
+        // The late/stray packet: player is no longer controlling any dragon.
+        var packet = new DismountDragonPacket(player.getId(), true);
+        packet.handle(null, player);
+
+        if (PlayerStateUtils.getHandler(player).shouldDismount) {
+            helper.fail("shouldDismount was set true by a DismountDragonPacket arriving after the"
+                    + " player already stopped controlling a dragon — this permanently bounces the"
+                    + " next mount attempt (W8-SYNC-2)");
+        }
+
+        helper.succeed();
     }
 
     /**
