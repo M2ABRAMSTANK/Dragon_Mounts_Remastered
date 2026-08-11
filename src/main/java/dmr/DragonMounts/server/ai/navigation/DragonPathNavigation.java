@@ -32,6 +32,14 @@ public class DragonPathNavigation extends FlyingPathNavigation {
     protected PathFinder createPathFinder(int pMaxVisitedNodes) {
         this.dragonNodeEvaluator = new DragonNodeEvaluator(mob);
         this.nodeEvaluator = dragonNodeEvaluator;
+        // W8-PF4: restores the exact call FlyingPathNavigation.createPathFinder makes
+        // (verified against decompiled source) that this override had silently dropped —
+        // open doors were being rewritten to BLOCKED instead of treated as passable.
+        // Safe here even though swimNodeEvaluator/walkNodeEvaluator are constructed
+        // inside `new DragonNodeEvaluator(mob)` above: that constructor fully initializes
+        // both delegate fields before returning, so by the time setCanPassDoors forwards
+        // to them (via the override above) they already exist.
+        this.nodeEvaluator.setCanPassDoors(true);
         return new PathFinder(this.nodeEvaluator, pMaxVisitedNodes);
     }
 
