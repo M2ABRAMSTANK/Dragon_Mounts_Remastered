@@ -114,14 +114,17 @@ abstract class DragonCombatComponent extends DragonBreedableComponent {
      * DragonHurtByTargetGoal}.
      *
      * <p>
-     * Not purely an FTB Teams/Open Parties and Claims addition: {@link
-     * DragonAllyService#isTeammateOfOwner} also refuses a target that is another pet owned
-     * by the SAME player as this dragon's owner (while that owner is online) —
-     * UNCONDITIONALLY, not gated by {@code DRAGON_TEAM_PASSIVITY}, and with no team mod
-     * installed or provider ever touched — see that method's class javadoc ("One real
-     * no-mod delta") for the operand-order reason why. So a tamed dragon no longer assists
-     * its owner against, nor is stirred to defend the owner against, another of the owner's
-     * own pets, where it previously did.
+     * NOTE: this method itself has no same-owner-pet-vs-pet delta — the pre-existing body
+     * below already refused any target owned by the same {@code owner} argument the calling
+     * goal supplies (both {@code OwnerHurtByTargetGoal} and {@code OwnerHurtTargetGoal} pass
+     * the dragon's own owner there), so {@link DragonAllyService#isTeammateOfOwner}'s
+     * teammate check is the only thing this hook adds. The real same-owner pet-vs-pet delta
+     * from {@code DragonAllyService#isTeammateOfOwner}'s "one real no-mod delta" (an
+     * UNCONDITIONAL behavior change, not gated by {@code DRAGON_TEAM_PASSIVITY}) lives
+     * elsewhere: see {@code DragonAI#maybeRetaliate}'s javadoc and {@code
+     * DragonAttackablesSensor#isMatchingEntity}'s {@code modOnlyAlly} comment (line ~38),
+     * where the operand order of {@code isAlliedTo} genuinely differs from vanilla's own
+     * pet-ownership short-circuit.
      */
     public boolean wantsToAttack(LivingEntity target, LivingEntity owner) {
         if (DragonAllyService.isTeammateOfOwner(getDragon(), target)) {

@@ -1077,13 +1077,32 @@ public class DragonTeamPassivityTests {
      * wolf.getHealth()} is a real, falsifiable assertion — one that additionally exercises
      * {@link DragonAllyService}'s pet-normalizing path (a teammate's tamed pet, not just the
      * teammate themselves, standing in the swing arc), which no other test in this class
-     * covers. Confirmed this is provably red on the pre-fix raw {@code
-     * !s.isAlliedTo(player)} selector: unlike a tamed dragon (which recurses through {@code
-     * TamableAnimal#isAlliedTo} on both sides), a vanilla {@code Wolf} owned by an unteamed
-     * player is NOT vanilla-allied to that player's teammate — {@code wolf.isAlliedTo(owner)}
-     * delegates to {@code teammate.isAlliedTo(owner)}, which is {@code false} with no shared
-     * scoreboard team — so the raw selector would include the wolf as a real target and this
-     * test would fail with it undamaged after the swing.
+     * covers.
+     *
+     * <p>
+     * The teammate {@code GameTestPlayer} is positioned OUTSIDE the swing arc (unlike the
+     * sibling {@code riddenMeleeSwingSkipsTeammateAndHitsRealTarget}, which needs them in
+     * it): an earlier version of this test also left the teammate inside the arc, and
+     * empirically that made it vacuous rather than red-provable — {@code
+     * entities.stream()...findFirst()} in {@code DragonAttackPacket} picks entities in
+     * iteration order, not by type, so with both the teammate and their wolf in the arc the
+     * teammate (a {@code GameTestPlayer}) was found first on the RAW pre-fix selector too,
+     * and the mock framework's silent no-op of incoming damage to {@code GameTestPlayer}s
+     * left {@code wolf.getHealth()} unchanged either way — the test passed on both pre-fix
+     * and post-fix code. Verified directly: reverting {@code DragonAttackPacket}'s selector
+     * to the pre-fix raw {@code TargetingConditions.forCombat().selector(player::canAttack)
+     * .selector(s -> !s.isAlliedTo(player))} with the teammate still in-arc left this test
+     * GREEN (log: {@code /tmp/rev_teams_redproof_melee.log}). With the teammate moved out of
+     * the arc as coded now, the wolf becomes the sole in-arc candidate on both selectors: on
+     * the reverted pre-fix selector, {@code wolf.isAlliedTo(owner)} delegates through {@code
+     * TamableAnimal#isAlliedTo} to {@code teammate.isAlliedTo(owner)}, which is {@code false}
+     * with no shared vanilla scoreboard team, so the raw selector includes the wolf, the
+     * swing connects, and this test correctly goes RED (log: {@code
+     * /tmp/rev_teams_redproof_melee2.log}, alongside the sibling test also failing red for
+     * its own reasons). On the shipped {@code DragonAllyService.isAllied} selector with the
+     * stub {@link TeamProvider} installed, the wolf normalizes to the teammate's UUID, reads
+     * as an ally, and is excluded, so the swing whiffs and this test passes GREEN (log:
+     * {@code /tmp/rev_teams_proposedfix.log}, {@code All 143 required tests passed :)}).
      */
     @EmptyTemplate(value = ROOMY_TEMPLATE, floor = true)
     @GameTest
@@ -1096,7 +1115,13 @@ public class DragonTeamPassivityTests {
         owner.moveTo(dragon.getX(), dragon.getY(), dragon.getZ());
         owner.yBodyRot = 0f;
         var teammate = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
-        teammate.moveTo(dragon.getX(), dragon.getY(), dragon.getZ() + 5);
+        // Deliberately OUTSIDE the swing arc (unlike the sibling test): if the teammate
+        // themselves also stood in the arc, the raw pre-fix selector would pick the
+        // teammate (a GameTestPlayer) as `entities.stream()...findFirst()`'s target before
+        // ever reaching the wolf, and the mock framework's silent no-op of incoming damage
+        // to GameTestPlayers would make this test pass on BOTH pre-fix and post-fix code —
+        // vacuous regardless of the fix. See this method's javadoc for the empirical proof.
+        teammate.moveTo(dragon.getX() + 8, dragon.getY(), dragon.getZ() + 8);
         var teammatePet = helper.spawn(EntityType.WOLF, DMRTestConstants.TEST_POS);
         teammatePet.moveTo(dragon.getX(), dragon.getY(), dragon.getZ() + 5);
         teammatePet.tame(teammate);
