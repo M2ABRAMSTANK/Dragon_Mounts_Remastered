@@ -259,12 +259,26 @@ public class DragonCommandPacket extends AbstractMessage<DragonCommandPacket> {
                 player.displayClientMessage(Component.translatable("dmr.command_mode.follow.text"), true);
             }
             case WANDER -> {
-                // W8-SUMMON-3: DragonAI#getWanderTarget strips the GlobalPos's
-                // dimension and paths toward the raw BlockPos unconditionally — setting
-                // a target in the PLAYER's dimension for a dragon findDragon resolved
-                // in a DIFFERENT dimension would silently mis-path it once it arrives
-                // there. SIT/FOLLOW/agro-state setters need no such guard (pure
-                // entity-local flags); FOLLOW's ambient AI already safely no-ops
+                // W8-SUMMON-3 (fix-round corrected rationale — see red-baseline.md):
+                // this guard is NOT about a mis-pathed walk target. DragonOwnershipComponent
+                // #hasWanderTarget() already dimension-checks (pos.dimension() ==
+                // level.dimension()) before DragonAI ever strips the GlobalPos down to a
+                // BlockPos, and DragonAI#createWanderingBehavior gates its StayCloseToTarget
+                // behavior behind that same hasWanderTarget() predicate — so a cross-dimension
+                // GlobalPos is never dereferenced as a walk target. The real hazard is
+                // #setWanderTarget's side effects: it unconditionally arms the SHOULD_WANDER
+                // brain memory and calls stopSitting(), regardless of dimension. With
+                // SHOULD_WANDER present, WANDER becomes the dragon's active activity (it wins
+                // over IDLE in selectMostAppropriateActivity's FIGHT/WANDER/SIT/IDLE priority
+                // order) — but WANDER's only behavior still no-ops, because hasWanderTarget()
+                // reads false once evaluated in the dragon's own (different) dimension. The
+                // dragon is left running no activity behaviors at all: WANDER is active but
+                // inert, and IDLE's owner-follow behaviors never get a chance to run, because
+                // they require WANDER to not be the active activity. Nothing clears this on
+                // its own — only a later same-dimension SIT/FOLLOW/WANDER press, or a summon
+                // (DragonWhistleHandler#summonExistingDragon resets setWanderTarget(empty)
+                // before transfer), un-wedges it. SIT/FOLLOW/agro-state setters need no such
+                // guard (pure entity-local flags); FOLLOW's ambient AI already safely no-ops
                 // cross-dimension since TamableAnimal#getOwner() is level-scoped.
                 if (!dragon.level().dimension().equals(level.dimension())) {
                     player.displayClientMessage(

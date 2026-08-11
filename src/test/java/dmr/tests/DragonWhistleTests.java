@@ -2585,14 +2585,20 @@ public class DragonWhistleTests {
     }
 
     /**
-     * {@code DragonAI#getWanderTarget} strips the {@code GlobalPos}'s dimension and
-     * paths toward the raw {@code BlockPos} unconditionally — arming a WANDER target
-     * in the PLAYER's dimension for a dragon findDragon resolved in a DIFFERENT
-     * dimension would silently mis-path it once it eventually arrives there. Mirrors
-     * {@link #callAcrossDimensions}' changeDimension setup, but never summons the
-     * dragon back — it stays in the Nether, and the WANDER command (issued from the
-     * player's Overworld connection) must be refused rather than arming a
-     * wrong-dimension target.
+     * (Fix-round corrected — see red-baseline.md: the original javadoc here repeated a
+     * falsified claim.) The guard under test does not prevent a mis-pathed walk target
+     * — {@code DragonOwnershipComponent#hasWanderTarget()} already dimension-checks
+     * before {@code DragonAI} ever strips the {@code GlobalPos} down to a raw {@code
+     * BlockPos}, so a cross-dimension target is never dereferenced as a walk target.
+     * What the guard actually prevents: {@code setWanderTarget} unconditionally arms
+     * the {@code SHOULD_WANDER} brain memory and calls {@code stopSitting()}
+     * regardless of dimension, which would make WANDER the dragon's active activity
+     * (it outranks IDLE) while its own behavior permanently no-ops in the dragon's
+     * actual dimension — wedging the dragon out of its owner-follow behaviors with no
+     * self-recovery. Mirrors {@link #callAcrossDimensions}' changeDimension setup, but
+     * never summons the dragon back — it stays in the Nether, and the WANDER command
+     * (issued from the player's Overworld connection) must be refused rather than
+     * arming a target that would wedge the dragon's activity selection.
      *
      * <p>
      * Unlike {@link #callAcrossDimensions}, nothing here ever calls {@code callDragon}
