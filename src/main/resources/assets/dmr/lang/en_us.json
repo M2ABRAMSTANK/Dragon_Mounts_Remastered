@@ -40,6 +40,7 @@
   "dmr.dragon_call.nodragon": "You have no dragon to call!",
   "dmr.dragon_call.teleport_blocked": "Your dragon couldn't be teleported to you!",
   "dmr.dragon_call.not_found": "Your dragon could not be found!",
+  "dmr.dragon_call.walking": "Your dragon is on its way!",
   "dmr.dragon_call.respawn": "Your dragon is dead, you can call it back in %1$s seconds!",
   "dmr.dragon_call.unlink_first": "You must unbind this from your current dragon before you can bind another!",
   "dmr.dragon_call.unlink_success": "Successfully unbound from your dragon!",

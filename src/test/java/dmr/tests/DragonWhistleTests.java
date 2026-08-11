@@ -14,6 +14,7 @@ import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.items.DragonWhistleItem;
 import dmr.DragonMounts.server.worlddata.DragonWorldDataManager;
 import dmr.DragonMounts.util.PlayerStateUtils;
+import io.netty.channel.embedded.EmbeddedChannel;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,7 +27,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.contents.TranslatableContents;
+import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
@@ -1797,5 +1801,140 @@ public class DragonWhistleTests {
         } finally {
             netherLevel.getChunkSource().removeRegionTicket(TicketType.FORCED, colliderChunkPos, 0, colliderChunkPos);
         }
+    }
+
+    // -----------------------------------------------------------------------------
+    // W8-SUMMON-6 (commit 17): walk-branch summon feedback
+    // -----------------------------------------------------------------------------
+
+    /**
+     * Drains every {@link ClientboundSystemChatPacket} queued for this mock player
+     * since the last drain (or since connection). {@code
+     * ExtendedGameTestHelper#makeTickingMockServerPlayerInLevel} wires the returned
+     * {@code GameTestPlayer} to a real {@code Connection} sitting on an {@link
+     * EmbeddedChannel} (via {@code NetworkRegistry#configureMockConnection} +
+     * {@code PlayerList#placeNewPlayer} — verified against the decompiled sources of
+     * both {@code net.minecraft.gametest.framework.GameTestHelper} and NeoForge's
+     * {@code ExtendedGameTestHelper}). Unlike the command-dispatch path ({@link
+     * CapturingCommandSource}), {@code Player#displayClientMessage} has no
+     * purpose-built capture seam anywhere else in this test suite (see this wave's
+     * commits 10-12 and 14 red-baseline entries, which each accepted "no capture seam
+     * exists" as a real limitation) — but the EmbeddedChannel backing the mock
+     * player's connection IS a concrete, already-wired one: {@code Connection#send}
+     * forwards straight to {@code channel.writeAndFlush(packet)} with no encoder in
+     * the test pipeline (the pipeline holds only the {@code Connection} handler
+     * itself, which is inbound-only), so an outbound packet lands in the
+     * EmbeddedChannel's outbound queue unmodified and is readable via {@code
+     * readOutbound()} — the exact {@code Component} instance that was sent.
+     *
+     * <p>
+     * The explicit {@code channel.flush()} below is load-bearing, not defensive
+     * boilerplate: {@code MinecraftServer}'s tick loop calls {@code
+     * connection.suspendFlushing()} on every player at the START of each tick and
+     * {@code resumeFlushing()} (which itself flushes) at the END — a per-tick write
+     * batching optimization. A gametest sequence step runs INSIDE that window, so
+     * {@code ServerCommonPacketListenerImpl#send}'s own {@code flag} computation
+     * (`!suspendFlushingOnServerThread || !server.isSameThread()`) resolves to
+     * {@code flush=false} and the packet sits in the pipeline's unflushed write
+     * buffer — invisible to {@code readOutbound()} — until the tick ends. Calling
+     * {@code channel.flush()} directly (bypassing the Connection's own bookkeeping
+     * entirely) forces it into the readable queue immediately. Confirmed empirically:
+     * without this call, {@link #walkBranchSummonSendsExactlyOneFeedbackMessage}
+     * observes zero messages even though the packet was genuinely sent (see
+     * red-baseline.md).
+     */
+    private static List<Component> drainSystemChatMessages(ServerPlayer player) {
+        var channel = (EmbeddedChannel) player.connection.getConnection().channel();
+        channel.flush();
+        List<Component> messages = new ArrayList<>();
+        Object outbound;
+        while ((outbound = channel.readOutbound()) != null) {
+            if (outbound instanceof ClientboundSystemChatPacket packet) {
+                messages.add(packet.content());
+            }
+        }
+        return messages;
+    }
+
+    /**
+     * W8-SUMMON-6: closes the gate's "missing" item — refute-summon.json
+     * missedBugs#3's second half. Pre-fix, the walk branch of {@code
+     * summonExistingDragon} wrote {@code cap.lastSummons} and a debug log and sent
+     * NOTHING to the player: the dragon is out of sight and may take a while to
+     * arrive, so a player whistling from inside the walk band had no confirmation the
+     * whistle did anything at all. Establishes the wave-wide invariant in code: every
+     * summon outcome emits exactly ONE terminal player signal (cross-dimension/
+     * teleport: the dragon visibly appearing next to the player; refused mint:
+     * {@code dmr.dragon_call.not_found}; walk: this new action-bar message).
+     *
+     * <p>
+     * Fails on pre-fix HEAD (zero {@code ClientboundSystemChatPacket}s queued after a
+     * walk-band summon — see red-baseline.md for the captured failure); passes after
+     * the fix (exactly one, carrying the {@code dmr.dragon_call.walking} translation
+     * key).
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void walkBranchSummonSendsExactlyOneFeedbackMessage(ExtendedGameTestHelper helper) {
+        var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
+        player.moveToCentre();
+
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+        dragon.tamedFor(player, true);
+
+        var index = 0;
+        DragonWhistleHandler.setDragon(player, dragon, index);
+
+        // Reposition the already-spawned dragon a small, well-within-walk-band
+        // distance from the player in ABSOLUTE coordinates (mirrors
+        // dragonFollowsWhenCalled's precedent) — helper.spawn's BlockPos argument is
+        // STRUCTURE-RELATIVE, not absolute, so offsetting player.blockPosition()
+        // directly would place the dragon somewhere unrelated to the player instead.
+        dragon.setPos(player.getX() + 6, player.getY(), player.getZ());
+
+        // getDragonSummonIndex (callDragon's own gate) requires the player to
+        // actually be HOLDING a whistle whose color id matches the bound index — the
+        // capability-only binding above is not enough on its own.
+        for (var whistle : ModItems.DRAGON_WHISTLES.values()) {
+            if (((DragonWhistleItem) whistle.get()).getColor().getId() == index) {
+                player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(whistle.get()));
+                break;
+            }
+        }
+
+        // Setup (placeNewPlayer's initial sync, moveToCentre's chunk-sender calls,
+        // tamedFor's own feedback, ...) queues packets of its own — drain and discard
+        // them so only the summon's OWN messages are counted below.
+        drainSystemChatMessages(player);
+
+        boolean called = DragonWhistleHandler.callDragon(player);
+        if (!called) {
+            helper.fail("callDragon reported failure for a plain, uncontested walk-band summon");
+            return;
+        }
+
+        var messages = drainSystemChatMessages(player);
+        var walkMessages = messages.stream()
+                .filter(component -> component.getContents() instanceof TranslatableContents contents
+                        && "dmr.dragon_call.walking".equals(contents.getKey()))
+                .toList();
+
+        if (walkMessages.isEmpty()) {
+            helper.fail("Walk-branch summon sent no dmr.dragon_call.walking feedback — the player has no"
+                    + " confirmation the whistle did anything (all system chat messages seen: " + messages + ")");
+            return;
+        }
+        if (walkMessages.size() > 1) {
+            helper.fail("Walk-branch summon sent " + walkMessages.size()
+                    + " dmr.dragon_call.walking messages instead of exactly one: " + walkMessages);
+            return;
+        }
+
+        helper.succeed();
     }
 }

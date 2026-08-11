@@ -640,6 +640,16 @@ public class DragonWhistleHandler {
             // Walk to player
             cap.lastSummons.put(summonItemIndex, dragon.getUUID());
 
+            // W8-SUMMON-6: the walk branch used to be the ONE summon outcome with no
+            // player-visible signal at all — the dragon is out of sight and may take a
+            // while to arrive (walk convergence quality is owned by the pathfind area
+            // this wave), so without this the player has no confirmation the whistle
+            // did anything. Establishes the wave-wide invariant: every summon outcome
+            // emits exactly ONE terminal player signal (cross-dimension/teleport: the
+            // dragon visibly appearing; refused mint: dmr.dragon_call.not_found; walk:
+            // this message).
+            player.displayClientMessage(Component.translatable("dmr.dragon_call.walking"), true);
+
             DMR.LOGGER.debug(
                     "Making dragon: {} follow player: {}",
                     dragon.getDragonUUID(),
