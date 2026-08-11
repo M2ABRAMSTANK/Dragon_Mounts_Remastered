@@ -6,9 +6,11 @@ import dmr.DragonMounts.registry.DragonArmorRegistry;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModItems;
+import dmr.DragonMounts.server.entity.TameableDragonEntity;
 import dmr.DragonMounts.server.items.DragonArmorItem;
 import dmr.DragonMounts.types.dragonBreeds.DragonBreed;
 import dmr.DragonMounts.util.PlayerStateUtils;
+import java.lang.reflect.Field;
 import java.util.Objects;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.sounds.SoundSource;
@@ -751,6 +753,106 @@ public class DragonTests {
         if (stepHeight.getBaseValue() == 9.0) {
             helper.fail("STEP_HEIGHT was not recomputed after a breed change — "
                     + "DragonBreedComponent#onSyncedDataUpdated did not run (super forwarding broken by the reorder)");
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * Sets a {@link DragonBreed}'s private {@code sizeModifier} field via reflection (no
+     * public setter exists — same pattern used by {@code BreedingUtilsTests} for
+     * {@code habitats}), registers it, and returns it for use in a test. Reflection
+     * failures are reported via {@code helper.fail} rather than a checked exception, to
+     * match this file's (and BreedingUtilsTests') existing convention for {@code @GameTest}
+     * methods.
+     */
+    private static DragonBreed makeSizedTestBreed(ExtendedGameTestHelper helper, String id, float sizeModifier) {
+        DragonBreed breed = new DragonBreed();
+        breed.setId(id);
+        try {
+            Field sizeModifierField = DragonBreed.class.getDeclaredField("sizeModifier");
+            sizeModifierField.setAccessible(true);
+            sizeModifierField.set(breed, sizeModifier);
+        } catch (Exception e) {
+            helper.fail("Failed to set sizeModifier for " + id + ": " + e.getMessage());
+        }
+        DragonBreedsRegistry.register(breed);
+        return breed;
+    }
+
+    /**
+     * Returns the additive culling margin {@code getBoundingBoxForCulling()} layers on top
+     * of the dragon's own hitbox, isolated from the hitbox's own scale-dependent growth
+     * (via {@code getDimensions}) by diffing against {@code getBoundingBox()} directly
+     * rather than comparing raw culling-box sizes.
+     */
+    private static double cullingMargin(TameableDragonEntity dragon) {
+        return dragon.getBoundingBoxForCulling().maxX - dragon.getBoundingBox().maxX;
+    }
+
+    /**
+     * W8-SYNC-6 regression: proves the culling margin now scales with the dragon's model
+     * size instead of staying pinned at a flat +5, while staying byte-identical to today
+     * for a default-scale (size modifier 1.0) adult. Isolates the margin itself (see
+     * {@link #cullingMargin}) rather than comparing raw culling-box dimensions, since
+     * {@code getBoundingBox()} already scales with size and conflating the two would prove
+     * nothing about the additive padding specifically.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void testCullingBoxScalesWithDragonSize(ExtendedGameTestHelper helper) {
+        var defaultScaleDragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        defaultScaleDragon.setBreed(makeSizedTestBreed(helper, "sync6_scale1_breed", 1.0f));
+        defaultScaleDragon.setBaby(false);
+
+        // Read synchronously (no tick elapses between spawn and the getBoundingBox* calls
+        // below), so both dragons can share the same spawn position without collision
+        // resolution ever running — no need for a larger-than-default template.
+        var oversizedDragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        oversizedDragon.setBreed(makeSizedTestBreed(helper, "sync6_scale2_breed", 2.0f));
+        oversizedDragon.setBaby(false);
+
+        var defaultMargin = cullingMargin(defaultScaleDragon);
+        var oversizedMargin = cullingMargin(oversizedDragon);
+
+        if (defaultMargin != 5.0) {
+            helper.fail("Default-scale (1.0) adult dragon's culling margin changed from today's flat +5 — expected"
+                    + " 5.0, got " + defaultMargin);
+        }
+
+        if (oversizedMargin <= defaultMargin) {
+            helper.fail("Size-modifier-2.0 dragon's culling margin (" + oversizedMargin
+                    + ") is not strictly larger than the default-scale margin (" + defaultMargin
+                    + ") — the culling box is not scaling with dragon size");
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SYNC-6 regression: proves the {@code Math.max(1.0, ...)} floor keeps a baby
+     * dragon's culling margin byte-identical to today's flat +5, rather than shrinking it
+     * proportionally to the baby's 0.5x scale factor.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void testCullingBoxFlooredForBabies(ExtendedGameTestHelper helper) {
+        var babyDragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        babyDragon.setBreed(makeSizedTestBreed(helper, "sync6_baby_breed", 1.0f));
+        babyDragon.setBaby(true);
+
+        var margin = cullingMargin(babyDragon);
+
+        if (margin != 5.0) {
+            helper.fail("Baby dragon's culling margin was not floored to today's flat +5 — got " + margin);
         }
 
         helper.succeed();

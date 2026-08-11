@@ -33,7 +33,19 @@ abstract class CoreDragonComponent extends TamableAnimal
 
     @Override
     public AABB getBoundingBoxForCulling() {
-        return getBoundingBox().inflate(5, 5, 5);
+        // W8-SYNC-6: getBoundingBox() already scales with the dragon's model size via
+        // getDimensions() below (BASE_WIDTH/BASE_HEIGHT * getScale()) — at scale 1 the
+        // culling box is already ~12.75 blocks wide against a 2.75-wide hitbox. Only the
+        // ADDITIVE culling margin was flat. Scaling that margin too keeps it generous
+        // relative to the (already larger) hitbox for big size-modifier breeds, instead of
+        // the margin becoming proportionally smaller as the dragon gets bigger. This is a
+        // tune of an already-shipped mechanism, not a fix for an undersized box — it must
+        // not be described as resolving #43/#111 (see culling-hypothesis.md's own caveat).
+        // Math.max(1.0, ...) FLOORS the multiplier at 1.0 so it can only ever grow the box:
+        // babies (getScale() < 1) and default-scale (1.0) adults get a result byte-identical
+        // to today's inflate(5, 5, 5) — never shrunk.
+        var padding = 5.0 * Math.max(1.0, getScale());
+        return getBoundingBox().inflate(padding, padding, padding);
     }
 
     @Override
