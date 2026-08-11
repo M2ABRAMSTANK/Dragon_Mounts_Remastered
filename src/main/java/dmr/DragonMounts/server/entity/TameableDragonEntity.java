@@ -324,10 +324,18 @@ public class TameableDragonEntity extends AbstractDragonEntity {
 
     @Override
     public void onSyncedDataUpdated(EntityDataAccessor<?> data) {
+        // W8-SYNC-3: super MUST run unconditionally, first, for every accessor —
+        // matching the vanilla LivingEntity contract (Entity/LivingEntity/AgeableMob/
+        // DragonBreedComponent all forward via super.onSyncedDataUpdated(data), so
+        // skipping it here for DATA_FLAGS_ID silently dropped the whole super chain for
+        // that one accessor). Verified behavior-preserving today: nothing up the chain
+        // (Entity's DATA_POSE check, LivingEntity's SLEEPING_POS_ID/DATA_LIVING_ENTITY_FLAGS,
+        // AgeableMob's DATA_BABY_ID, DragonBreedComponent's breedDataAccessor) matches
+        // DATA_FLAGS_ID — this only guards against a FUTURE component reacting to it and
+        // being silently swallowed the way this one was.
+        super.onSyncedDataUpdated(data);
         if (DATA_FLAGS_ID.equals(data)) {
             refreshDimensions();
-        } else {
-            super.onSyncedDataUpdated(data);
         }
     }
 

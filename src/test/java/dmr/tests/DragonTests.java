@@ -6,11 +6,13 @@ import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.registry.ModItems;
 import dmr.DragonMounts.server.items.DragonArmorItem;
+import dmr.DragonMounts.types.dragonBreeds.DragonBreed;
 import dmr.DragonMounts.util.PlayerStateUtils;
 import java.util.Objects;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -601,5 +603,101 @@ public class DragonTests {
                 helper.fail("Player is still riding dragon");
             }
         });
+    }
+
+    /**
+     * W8-SYNC-3 regression: {@code TameableDragonEntity#onSyncedDataUpdated} now
+     * calls {@code super} unconditionally BEFORE branching on {@code DATA_FLAGS_ID}
+     * (previously super was skipped entirely for that one accessor). This guards
+     * that the sit-pose dimension refresh the method has always performed directly
+     * still fires after the reorder.
+     *
+     * <p>
+     * No red-proof recorded for this test: per design-sync.json's compat audit
+     * (W8-Sync-3), no class in the super chain (Entity/LivingEntity/AgeableMob/
+     * DragonBreedComponent) special-cases DATA_FLAGS_ID, so this accessor's
+     * dimension refresh was never actually broken by the swallowed super call — see
+     * .fork-notes/wave8/red-baseline.md for the full carve-out rationale.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void sitPoseStillRefreshesDimensionsAfterSuperReorder(ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        var standingHeight = dragon.getBbHeight();
+
+        dragon.setOrderedToSit(true);
+
+        var sittingHeight = dragon.getBbHeight();
+        var expectedSittingHeight = 2.15f * dragon.getScale();
+
+        if (Math.abs(sittingHeight - expectedSittingHeight) > 0.001f) {
+            helper.fail("Dragon bounding-box height did not refresh to the sitting pose after"
+                    + " setOrderedToSit(true): expected " + expectedSittingHeight + " but was " + sittingHeight);
+        }
+
+        if (Math.abs(sittingHeight - standingHeight) < 0.001f) {
+            helper.fail("Dragon bounding-box height did not change between standing (" + standingHeight
+                    + ") and sitting (" + sittingHeight + ") — refreshDimensions() likely did not run");
+        }
+
+        helper.succeed();
+    }
+
+    /**
+     * W8-SYNC-3 regression: proves the reorder does not disturb the ALREADY-working
+     * forwarding for accessors other than {@code DATA_FLAGS_ID} — specifically
+     * {@code breedDataAccessor}, which {@code DragonBreedComponent}'s own
+     * {@code onSyncedDataUpdated} override reacts to by calling
+     * {@code updateAgeProperties()} (which resets the {@code STEP_HEIGHT} attribute
+     * to a computed value). {@code setBreed()} itself never calls
+     * {@code updateAgeProperties()} directly — only the accessor-update callback
+     * does — so deliberately corrupting {@code STEP_HEIGHT} and then observing it
+     * get reset by a breed change proves the callback chain (TameableDragonEntity ->
+     * ... -> DragonBreedComponent) actually ran end to end.
+     *
+     * <p>
+     * No red-proof recorded for this test: a non-{@code DATA_FLAGS_ID} accessor
+     * already called super in the pre-fix else-branch, so this path is unaffected by
+     * the reorder either way — see .fork-notes/wave8/red-baseline.md.
+     *
+     * @param helper
+     *               The game test helper
+     */
+    @EmptyTemplate(floor = true)
+    @GameTest
+    @TestHolder
+    public static void breedAccessorUpdateStillReachesDragonBreedComponentAfterSuperReorder(
+            ExtendedGameTestHelper helper) {
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
+        dragon.setBreed(DragonBreedsRegistry.getDefault());
+
+        DragonBreed testBreed = new DragonBreed();
+        testBreed.setId("sync3_breed_accessor_test");
+        DragonBreedsRegistry.register(testBreed);
+
+        // Deliberately corrupt an attribute that ONLY updateAgeProperties() (called
+        // from inside DragonBreedComponent#onSyncedDataUpdated, in reaction to a
+        // breedDataAccessor change) ever recomputes.
+        var stepHeight = dragon.getAttribute(Attributes.STEP_HEIGHT);
+        if (stepHeight == null) {
+            helper.fail("Dragon has no STEP_HEIGHT attribute instance");
+            return;
+        }
+        stepHeight.setBaseValue(9.0);
+
+        dragon.setBreed(testBreed);
+
+        if (stepHeight.getBaseValue() == 9.0) {
+            helper.fail("STEP_HEIGHT was not recomputed after a breed change — "
+                    + "DragonBreedComponent#onSyncedDataUpdated did not run (super forwarding broken by the reorder)");
+        }
+
+        helper.succeed();
     }
 }
