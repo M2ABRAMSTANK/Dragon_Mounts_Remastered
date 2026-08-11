@@ -33,17 +33,22 @@ public final class DragonPathfindingRules {
      * DROPPED (it would route all non-flying pathing through swimNodeEvaluator and make
      * PF4's walk delegate canFloat propagation unreachable for the exact scenario it was
      * added for)". This method therefore reproduces TODAY'S production formula (breed
-     * drown-immunity AND the target block being water) as a pure, testable function — it
-     * is the seam a later commit (W8-PF3, the allowFlying-vs-allowSwimming PRECEDENCE
-     * fix in {@code DragonNodeEvaluator}'s delegating methods) wires in; it is not a
-     * behavior change by itself, and this cluster's commits (W8-PF13a, W8-PF9/W8-PF4) do
-     * not call it from production code.
+     * drown-immunity AND the target block being water) as a pure, testable function.
      *
-     * @param drownImmune whether the dragon's breed is immune to drowning. Today's call
-     *     site computes this via {@code breed.getImmunities().contains("drown")}; the
-     *     amended W8-PF3 spec re-derives it from {@code
-     *     dragon.canDrownInFluidType(Fluids.WATER.getFluidType())} instead — this
-     *     method's boolean parameter is unaffected by which helper computed it.
+     * <p>
+     * <b>Wired in by W8-PF3</b> ({@link DragonPathNavigation#createPath}), alongside the
+     * allowFlying-vs-allowSwimming PRECEDENCE fix in {@code DragonNodeEvaluator}'s
+     * delegating methods — the two land in the same commit because the precedence bug is
+     * only observable when both flags can be true simultaneously, i.e. exactly when this
+     * predicate returns {@code true} for a dragon that is also flying.
+     *
+     * @param drownImmune whether the dragon's breed is immune to drowning. The
+     *     production call site derives this via {@code
+     *     !dragon.canDrownInFluidType(Fluids.WATER.getFluidType())} (that method returns
+     *     {@code true} when the dragon CAN drown, i.e. is NOT immune) rather than
+     *     re-implementing {@code breed.getImmunities().contains("drown")} at a second
+     *     call site — this method's boolean parameter is unaffected by which helper
+     *     computed it.
      * @param targetInWater whether the pathfind target block is water.
      * @return {@code true} if swim-mode node evaluation should be used.
      */

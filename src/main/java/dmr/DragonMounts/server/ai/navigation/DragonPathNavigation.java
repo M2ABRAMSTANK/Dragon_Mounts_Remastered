@@ -73,9 +73,20 @@ public class DragonPathNavigation extends FlyingPathNavigation {
 
         lastPathCreationDelta = 0;
 
-        dragonNodeEvaluator.allowSwimming = dragon.getBreed() != null
-                && dragon.getBreed().getImmunities().contains("drown")
-                && dragon.level.getFluidState(pos).is(Fluids.WATER);
+        // W8-PF3: derive drown-immunity through the existing canDrownInFluidType helper
+        // (DragonMovementComponent) instead of re-implementing the breed-immunity check
+        // at a second call site, and drive the actual predicate through
+        // DragonPathfindingRules.shouldAllowSwimming so it stays unit-testable in
+        // isolation. The design's dragon.isInWater() broadening is deliberately NOT
+        // applied here (see DragonPathfindingRules.shouldAllowSwimming's javadoc) — it
+        // was dropped at integration because it would route ALL non-flying pathing
+        // through swimNodeEvaluator and make the walk delegate's canFloat propagation
+        // (W8-PF4) unreachable for a dragon standing in water, the exact scenario it was
+        // added for.
+        boolean drownImmune =
+                !dragon.canDrownInFluidType(net.minecraft.world.level.material.Fluids.WATER.getFluidType());
+        boolean targetInWater = dragon.level.getFluidState(pos).is(Fluids.WATER);
+        dragonNodeEvaluator.allowSwimming = DragonPathfindingRules.shouldAllowSwimming(drownImmune, targetInWater);
 
         // If the dragon's already flying, we create a flight path right away.
         if (dragon.isFlying()) {

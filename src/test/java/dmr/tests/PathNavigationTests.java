@@ -3,7 +3,9 @@ package dmr.tests;
 import dmr.DragonMounts.registry.DragonBreedsRegistry;
 import dmr.DragonMounts.registry.ModEntities;
 import dmr.DragonMounts.server.ai.navigation.DragonNodeEvaluator;
+import dmr.DragonMounts.types.dragonBreeds.DragonBreed;
 import java.lang.reflect.Field;
+import java.util.List;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.gametest.framework.GameTest;
@@ -327,5 +329,87 @@ public class PathNavigationTests {
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Failed to inspect " + delegateFieldName + " teardown state via reflection", e);
         }
+    }
+
+    // ---------------------------------------------------------------------------------
+    // W8-PF3 (commit 3)
+    // ---------------------------------------------------------------------------------
+
+    /**
+     * Builds a fresh, registered drown-immune {@link DragonBreed} for a single test —
+     * mirrors {@code BreedingUtilsTests}' pattern of constructing+registering throwaway
+     * test breeds via reflection (the {@code immunities} field has no public setter;
+     * only a class-level Lombok {@code @Getter}) rather than depending on the real
+     * data-driven "water"/"ghost"/"ice" breed ids resolving to a specific string at
+     * gametest-server boot, which this test has no need to couple itself to.
+     */
+    private static DragonBreed createDrownImmuneTestBreed(String id) {
+        DragonBreed breed = new DragonBreed();
+        breed.setId(id);
+        try {
+            Field immunitiesField = DragonBreed.class.getDeclaredField("immunities");
+            immunitiesField.setAccessible(true);
+            immunitiesField.set(breed, List.of("drown"));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to set immunities on test breed " + id, e);
+        }
+        DragonBreedsRegistry.register(breed);
+        return breed;
+    }
+
+    /**
+     * W8-PF3. A drown-immune dragon, already flying ({@code allowFlying=true} via {@code
+     * dragon.isFlying()}), is asked to path 10 blocks across open air to a target block
+     * that is itself water — so {@code DragonPathfindingRules.shouldAllowSwimming} also
+     * comes back {@code true} for the same request, i.e. both {@code allowFlying} and
+     * {@code allowSwimming} are true simultaneously, exactly the precedence conflict
+     * W8-PF3 fixes.
+     *
+     * <p>
+     * Failure mode caught: pre-fix, {@code DragonNodeEvaluator.findAcceptedNode(int,int,int)}
+     * and {@code getPathType} both check {@code allowSwimming} BEFORE {@code
+     * allowFlying}, so every one of {@code FlyNodeEvaluator}'s 26 neighbour candidates
+     * along this route — plain open air, not water — gets graded through {@code
+     * SwimNodeEvaluator}, which only ever accepts {@code WATER}/{@code BREACH}-classified
+     * cells and adds a further malus penalty on top of that. See {@code
+     * .fork-notes/wave8/red-baseline.md} for the exact pre-fix failure recorded for this
+     * test.
+     */
+    @EmptyTemplate(SMALL_TEMPLATE)
+    @GameTest
+    @TestHolder
+    public static void flightPathToWaterTargetIsNotForcedIntoSwimEvaluation(ExtendedGameTestHelper helper) {
+        // Solid floor under the whole open room, matching walkPathTreatsOpenDoorAsPassable's
+        // proven-workable SMALL_TEMPLATE geometry (15x5x15, floor at y=0, dragon/target at
+        // y=1) — flight node-sampling never reaches down to y=0 from a y=1 start.
+        fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(14, 0, 14), Blocks.STONE.defaultBlockState());
+
+        var breed = createDrownImmuneTestBreed("test_drown_immune_w8pf3");
+        var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 1, 7));
+        dragon.setBreed(breed);
+        dragon.setFlying(true);
+
+        var navigation = dragon.getNavigation();
+        for (int i = 0; i < 5; i++) {
+            navigation.tick();
+        }
+
+        BlockPos waterPos = new BlockPos(12, 1, 7);
+        helper.setBlock(waterPos, Blocks.WATER.defaultBlockState());
+
+        BlockPos target = helper.absolutePos(waterPos);
+        Path path = navigation.createPath(target, 0);
+
+        if (path == null || !path.canReach()) {
+            helper.fail("DIAGNOSTIC flight path to water target did not reach: path="
+                    + (path == null ? "null" : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount()))
+                    + " target=" + target);
+        }
+        if (path.getNodeCount() <= 2) {
+            helper.fail("Flight path to water target has too few nodes (" + path.getNodeCount()
+                    + ") to have actually routed over 10 blocks of open air rather than being rejected/degenerate");
+        }
+
+        helper.succeed();
     }
 }

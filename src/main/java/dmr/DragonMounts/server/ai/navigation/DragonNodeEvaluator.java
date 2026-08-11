@@ -152,9 +152,17 @@ public class DragonNodeEvaluator extends FlyNodeEvaluator {
         return walkNodeEvaluator.getNeighbors(outputArray, p_node);
     }
 
+    // W8-PF3: allowFlying now wins over allowSwimming here too, matching getNeighbors'
+    // existing precedence. Before this fix, a flying retry (allowFlying=true) whose
+    // target/breed also satisfied allowSwimming got every FlyNodeEvaluator neighbour
+    // graded through swimNodeEvaluator.findAcceptedNode instead of the flight rules —
+    // SwimNodeEvaluator only ever accepts WATER/BREACH-classified cells and adds a
+    // further malus penalty on top, so a flying dragon retrying toward (or over) water
+    // had its open-air neighbours rejected or overpriced for no reason connected to
+    // flight itself.
     @Override
     protected @Nullable Node findAcceptedNode(int x, int y, int z) {
-        if (this.allowSwimming) {
+        if (this.allowSwimming && !this.allowFlying) {
             return swimNodeEvaluator.findAcceptedNode(x, y, z);
         }
 
@@ -187,12 +195,19 @@ public class DragonNodeEvaluator extends FlyNodeEvaluator {
         return walkNodeEvaluator.findAcceptedNode(x, y, z, verticalDeltaLimit, nodeFloorLevel, direction, pathType);
     }
 
+    // W8-PF3: same precedence bug as findAcceptedNode(int,int,int) above, at the
+    // single-cell classification level this time — reorder so allowFlying is checked
+    // first, matching getNeighbors' existing precedence and findAcceptedNode's fix
+    // above. Pre-fix, this method's allowSwimming-first check meant a flying retry
+    // toward a water target had every cell (including the water target cell itself,
+    // which SwimNodeEvaluator.getPathTypeOfMob's box-sampling can resolve to BLOCKED)
+    // graded under swim rules instead of flight rules.
     @Override
     public PathType getPathType(PathfindingContext context, int x, int y, int z) {
-        if (allowSwimming) {
-            return swimNodeEvaluator.getPathType(context, x, y, z);
-        } else if (allowFlying) {
+        if (allowFlying) {
             return super.getPathType(context, x, y, z);
+        } else if (allowSwimming) {
+            return swimNodeEvaluator.getPathType(context, x, y, z);
         } else {
             return walkNodeEvaluator.getPathType(context, x, y, z);
         }
