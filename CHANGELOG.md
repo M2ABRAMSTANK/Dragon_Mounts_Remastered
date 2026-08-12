@@ -5,6 +5,83 @@ changelog; this file starts at the fork's first release. See [`readme.md`](readm
 the fork's status and scope, and [`.fork-notes/`](.fork-notes/) for the full technical
 investigation (file:line references, upstream issue/commit history, advisor rulings).
 
+## [1.9.2-community.4] — 2026-08-11
+
+Wave 8: a full hardening pass over dragon summoning, pathfinding, and client sync, plus a
+new team-passivity feature. Every change was adversarially reviewed against decompiled
+vanilla sources; the test suite grew from 86 to 147 gametests (plus 63 unit tests), green
+across three consecutive full runs. Full technical detail:
+`.fork-notes/release-notes-1.9.2-community.4.md` and `.fork-notes/wave8/`.
+
+### Fixed — summoning
+
+- **Walk-vs-teleport decision:** the walk threshold was a stale 64-block constant — double
+  the pathfinder's actual `FOLLOW_RANGE` search ceiling (32) — so dragons whistled from
+  33–64 blocks silently crawled in multi-hop best-effort legs instead of teleporting. The
+  decision now reads the dragon's live follow-range attribute; new server config
+  `SUMMON_WALK_MAX_DISTANCE` (0 = live attribute, 64 restores old behavior).
+- **Every summon outcome now emits exactly one action-bar message** (the walk branch was
+  fully silent). A whistled dragon mid-fight now actually disengages (recall grace window)
+  instead of instantly re-acquiring its target.
+- **Radial-menu commands (Sit/Follow/Wander/stances) no longer silently no-op** when the
+  dragon is in another dimension or unloaded chunk — they now use the same hardened
+  cross-dimension resolution as the whistle, with not-found feedback, a rate-limited
+  fallback search, an id-keyed dispatch (closes a reachable ordinal-indexing crash), and a
+  guard against arming cross-dimension wander targets.
+- **Two dragon-loss paths closed:** a refused spawn during snapshot respawn now restores
+  the whistle binding exactly and reports failure (previously it could strand the binding
+  on a never-spawned clone — permanent loss under aggressive duplicate resolution), and
+  death-record evidence is only consumed after the respawned dragon actually joins the
+  world (a transient refusal can no longer burn it). `/dmr recall`/`/dmr spawn` report
+  honest results; `/dmr spawn` mints a fresh entity UUID (closes a collision surface).
+
+### Fixed — pathfinding
+
+- **Deleted `streamlinePath`**, which collapsed every computed flight path to its single
+  final node — flying dragons beelined blind into terrain, discarding all obstacle
+  avoidance. Corner-cutting line-of-sight shortcuts restored for flight.
+- The 5-tick repath throttle no longer returns null (vanilla read that as "unreachable"
+  and erased the follow target); cached-path reuse is now same-target-only.
+- Node-evaluation fixes for a 2.75-block-wide flyer: `allowFlying` precedence in every
+  delegating evaluator method, `canPassDoors` restored, capability flags propagated to
+  sub-evaluators, proper evaluator teardown, and leaf-adjacent air no longer rejected
+  wholesale. Navigation search radius now scales per-request from the live follow-range
+  attribute (datapack overrides respected both directions). Latent `getNextNode()` crash
+  on a completed path fixed. Pathfinding went from zero test coverage to a dedicated
+  harness with red-proven gametests.
+
+### Fixed — sync & visibility
+
+- **Likely fix for "dragon invisible to one player until relog" (#43/#111 class):** the
+  dragon's render culling box now scales with its actual size, so occlusion-culling mods
+  (EntityCulling/MoreCulling — both in BMC5, whose config whitelists the vanilla ender
+  dragon for exactly this reason) stop hiding large dragons. Every server-side theory was
+  refuted against decompiled sources; an opt-in server diagnostic (default off) ships so
+  any recurrence produces decisive evidence. This release does NOT claim those issues
+  definitively resolved.
+- Clientbound `DragonStatePacket`/`DismountDragonPacket` no longer run mutation logic on
+  the receiving client (the owner's client was clobbering its own dragon copy with stale
+  state; a dismount echo could persist a stuck flag into the player attachment).
+- `onSyncedDataUpdated` no longer swallows the superclass chain for entity flags; the
+  server no longer sends an empty whistle-NBT sync that wiped the client's snapshot.
+
+### Added — team passivity
+
+- Tamed dragons are now passive toward players teamed with their owner — even if a
+  teammate hits them accidentally, and even for fights already in progress when the team
+  forms. Ally resolution: vanilla scoreboard → FTB Teams → Open Parties & Claims (both via
+  soft reflection, no hard dependency). Applies to retaliation, owner-assist, target
+  scanning, breath attacks, and ridden melee. Config `DRAGON_TEAM_PASSIVITY` (default on);
+  unteamed players see identical behavior, locked by a parity test. One unconditional
+  delta: a dragon no longer attacks another dragon owned by the same player.
+
+### Compatibility
+
+- **Drop-in for servers on community.2/.3 — no client lockstep.** No packet wire changes,
+  no NBT/world-data changes, no registry changes (verified by a field-by-field audit of
+  the full wave diff). Clients on .2/.3 keep working and gain the client-side fixes
+  (culling visibility, local-echo removal) whenever they update.
+
 ## [1.9.2-community.3] — 2026-08-09
 
 `1.9.2-community.2` jars were already built and distributed by the time this was found,
