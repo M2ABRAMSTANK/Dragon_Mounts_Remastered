@@ -174,11 +174,13 @@ public class DragonPathNavigation extends FlyingPathNavigation {
         }
 
         // Reset on EVERY branch that reaches here — i.e. both "window elapsed" AND
-        // "throttled but nothing usable to fall back on" — not only the window-elapsed
-        // case. Resetting only on window-elapsed (the original sketch's bug) means an
-        // unreachable or freshly-retargeted request never re-arms the throttle, so a
-        // dragon with no reachable path would run a full A* EVERY tick instead of
-        // 1-in-5 — a live-server regression precisely where A* is most expensive.
+        // "throttled but nothing usable to fall back on" — so the reuse window above is
+        // always measured from the most recent A* computation, whichever branch
+        // triggered it. Note this is counter bookkeeping only, not a rate limit on the
+        // computation itself: the gate above can only serve a usable cached path — it
+        // never suppresses a fresh computation — so a request with no usable cached
+        // path (e.g. an unreachable target that keeps yielding nothing to cache) still
+        // falls through and runs a full A* on every call regardless of this reset.
         lastPathCreationDelta = 0;
 
         // W8-PF3: derive drown-immunity through the existing canDrownInFluidType helper
@@ -252,8 +254,10 @@ public class DragonPathNavigation extends FlyingPathNavigation {
     // is a genuine pre-existing bug (the double-super.createPath structure predates wave
     // 8; unrelated to and not amplified by this cluster's changes — if anything commit
     // 8's widened followRange makes the walk attempt reach more often, reducing
-    // exposure), tracked on the fork's backlog rather than fixed here since it is out of
-    // this cluster's scope. DMR's own throttle is unaffected by it (it gates entry to
+    // exposure), parked to Wave 9 on .fork-notes/wave8/HANDOFF-2026-08-10.md's parked
+    // list (walk->fly pre-emption, alongside the isFlying three-writer collapse) rather
+    // than fixed here since it is out of this cluster's scope. DMR's own throttle is
+    // unaffected by it (it gates entry to
     // createPath, not this retry), so it remains the only thing here actually protecting
     // against the null-return failure mode W8-PF2 fixed — hence: kept.
     private Path createPathWithFlyingAllowed(BlockPos pos, int accuracy) {

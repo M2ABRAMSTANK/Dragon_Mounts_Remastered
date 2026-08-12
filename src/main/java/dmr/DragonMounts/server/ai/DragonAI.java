@@ -286,10 +286,7 @@ public class DragonAI {
         return BehaviorFactory.withCondition(
                 dr -> dr.isTame() && dr.getAgroState() != DragonAgroState.PASSIVE,
                 BehaviorFactory.withGoals(
-                        e -> true,
-                        OwnerHurtByTargetGoal::new,
-                        OwnerHurtTargetGoal::new,
-                        DragonHurtByTargetGoal::new));
+                        e -> true, OwnerHurtByTargetGoal::new, OwnerHurtTargetGoal::new, DragonHurtByTargetGoal::new));
     }
 
     /**
@@ -597,9 +594,13 @@ public class DragonAI {
      * already in progress when a team forms — or one acquired through some other gate's
      * gap — actually ends, rather than mauling that teammate indefinitely. Without this,
      * {@code canUse()}-only gates (T3-S3/S4) only stop a teammate being ACQUIRED as a
-     * target; {@code StopAttackingIfTargetInvalid.create()}'s bare no-args form never
-     * drops a target on its own ({@code canStopAttacking} is a constant {@code p -> false},
-     * decompiled sources), and {@code TargetGoal#canContinueToUse} only drops a target on
+     * target; {@code StopAttackingIfTargetInvalid.create()}'s bare no-args form does drop
+     * targets on its own — when the target dies, leaves the mob's level, fails {@code
+     * Mob#canAttack}, or has been unreachable for 200+ ticks ({@code
+     * CANT_REACH_WALK_TARGET_SINCE}); its {@code canStopAttacking} predicate being the
+     * constant {@code p -> false} only disables the extra custom-predicate exit
+     * (decompiled sources) — but none of those exits fires for a live, reachable,
+     * same-level teammate; and {@code TargetGoal#canContinueToUse} only drops a target on
      * a VANILLA scoreboard-team match — nothing for the FTB/OPAC path.
      *
      * @param mob The entity ticking the FIGHT activity's behaviors (always a {@link

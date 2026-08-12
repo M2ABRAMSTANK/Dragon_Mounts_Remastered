@@ -35,7 +35,8 @@ public class DragonAttackablesSensor extends NearestVisibleLivingEntitySensor {
         // so the check still holds when the owner is offline/cross-dimension (getOwner()
         // returning null here just makes isTeammateOfOwner fall through to its own
         // UUID-keyed path rather than silently reading as "not a teammate").
-        var modOnlyAlly = dragon.isTame() && !target.isAlliedTo(dragon) && DragonAllyService.isTeammateOfOwner(dragon, target);
+        var modOnlyAlly =
+                dragon.isTame() && !target.isAlliedTo(dragon) && DragonAllyService.isTeammateOfOwner(dragon, target);
 
         if (dragon.getOwner() instanceof Player player) {
             // `&& !modOnlyAlly` is the actual fix: the legacy override's own trigger
@@ -66,6 +67,15 @@ public class DragonAttackablesSensor extends NearestVisibleLivingEntitySensor {
         var predicateMatches = predicate.matches((ServerLevel) dragon.level, target.position(), target);
         var canHunt = !dragon.isTame() || dragon.getAgroState() == DragonAgroState.AGGRESSIVE;
 
+        // `&& !modOnlyAlly` here is defense-in-depth, not an active part of the fix:
+        // under shipped data this term is unreachable, because reaching it requires
+        // `predicateMatches` against the shipped dragon_hunting_target /
+        // wild_dragon_hunting_target entity-type tags (undead/arthropod/raiders/farm
+        // animals — no players), while modOnlyAlly can only be true for a team-capable
+        // target (a teammate, or a pet resolving to one via isTeammateOfOwner's owner
+        // delegation). The load-bearing modOnlyAlly site is the owner-riding retaliation
+        // branch above; this one only matters if a datapack ever widens the hunting tags
+        // to cover team-capable entities.
         return ((this.isClose(attacker, target) && Sensor.isEntityAttackable(attacker, target) && isNotAllied)
                 && predicateMatches
                 && canHunt

@@ -642,9 +642,14 @@ public class DragonTeamPassivityTests {
      * only later becomes a teammate (a team forming mid-fight, or an acquisition gap in
      * some other gate) must actually end — the {@code EraseMemoryIf} entry in {@code
      * DragonAI#initFightActivity}. Without it, {@code canUse()}-only gates never revisit
-     * an already-running goal, {@code StopAttackingIfTargetInvalid.create()}'s bare
-     * no-args form never drops a target on its own, and {@code TargetGoal#canContinueToUse}
-     * only drops a target on a VANILLA scoreboard-team match.
+     * an already-running goal; {@code StopAttackingIfTargetInvalid.create()}'s bare
+     * no-args form does drop targets on its own — when the target dies, leaves the mob's
+     * level, fails {@code Mob#canAttack}, or has been unreachable for 200+ ticks ({@code
+     * CANT_REACH_WALK_TARGET_SINCE}); its {@code canStopAttacking} predicate being the
+     * constant {@code p -> false} only disables the extra custom-predicate exit
+     * (decompiled sources) — but none of those exits fires for a live, reachable,
+     * same-level teammate; and {@code TargetGoal#canContinueToUse} only drops a target
+     * on a VANILLA scoreboard-team match.
      */
     @EmptyTemplate(floor = true)
     @GameTest
@@ -865,7 +870,8 @@ public class DragonTeamPassivityTests {
         dragon.tamedFor(owner, true);
 
         var scoreboard = helper.getLevel().getServer().getScoreboard();
-        PlayerTeam team = scoreboard.addPlayerTeam("dmrTeamPassivityLegacy" + UUID.randomUUID().toString().substring(0, 8));
+        PlayerTeam team = scoreboard.addPlayerTeam(
+                "dmrTeamPassivityLegacy" + UUID.randomUUID().toString().substring(0, 8));
         try {
             scoreboard.addPlayerToTeam(owner.getScoreboardName(), team);
             scoreboard.addPlayerToTeam(vanillaAlly.getScoreboardName(), team);

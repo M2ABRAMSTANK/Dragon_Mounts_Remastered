@@ -6,9 +6,13 @@ public class ModConstants {
 
     public static class DragonConstants {
 
-        // Multiplier for BASE_FOLLOW_RANGE when determining if a dragon should walk or
-        // teleport to
-        // player
+        // W8-PF10: multiplier applied to the live FOLLOW_RANGE attribute to derive the
+        // pathfinder's search-radius ceiling — consumed ONLY via pathfindSearchRadius
+        // below, the shared range contract DragonPathNavigation's per-request followRange
+        // clamp and walkSummonMaxDistance's invariant clamp both build on. No longer the
+        // summon walk/teleport threshold: that decision (DragonWhistleHandler
+        // .summonExistingDragon) now reads the live FOLLOW_RANGE attribute plus
+        // ServerConfig.SUMMON_WALK_MAX_DISTANCE through walkSummonMaxDistance below.
         public static final double FOLLOW_RANGE_MULTIPLIER = 2.0;
 
         /**

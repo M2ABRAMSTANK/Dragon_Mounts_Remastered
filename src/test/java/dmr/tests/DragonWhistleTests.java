@@ -2075,10 +2075,9 @@ public class DragonWhistleTests {
                     .map(Component::getString)
                     .anyMatch(msg -> msg.contains("refusing to recall a colliding real UUID"));
             if (!sawCollisionMessage) {
-                helper.fail(
-                        "runRecall refused, but not via the cross-level real-UUID collision check — expected a"
-                                + " message containing \"refusing to recall a colliding real UUID\", got: "
-                                + capture.messages);
+                helper.fail("runRecall refused, but not via the cross-level real-UUID collision check — expected a"
+                        + " message containing \"refusing to recall a colliding real UUID\", got: "
+                        + capture.messages);
                 return;
             }
 
@@ -2250,8 +2249,7 @@ public class DragonWhistleTests {
      * test outright (returns {@code null}) if the hostile could not be constructed or
      * added — callers must check for that before proceeding.
      */
-    @Nullable
-    private static AggressiveDragonWithHostile spawnAggressiveDragonWithLiveHostileInRange(
+    @Nullable private static AggressiveDragonWithHostile spawnAggressiveDragonWithLiveHostileInRange(
             ExtendedGameTestHelper helper, ServerPlayer player) {
         var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), DMRTestConstants.TEST_POS);
         dragon.setBreed(DragonBreedsRegistry.getDefault());
@@ -2676,16 +2674,24 @@ public class DragonWhistleTests {
             // Discard setup packets so only the WANDER command's own feedback (if any)
             // is counted below. This is the discriminator that actually distinguishes
             // "the guard explicitly refused" from "resolution silently failed and the
-            // switch was skipped entirely" — both leave hasWanderTarget() false, but
+            // switch was skipped entirely" — both leave the wander target unarmed, but
             // only the FIXED code sends dmr.dragon_call.not_found in either case; the
             // pre-fix bare-lookup-miss path sends nothing at all.
             drainSystemChatMessages(player);
 
             new DragonCommandPacket(Command.WANDER).handleServer(null, player);
 
-            if (found.hasWanderTarget()) {
-                helper.fail("WANDER armed a cross-dimension GlobalPos target instead of being refused with"
-                        + " feedback");
+            // Cleanup-round (post-review): assert on the RAW wander-target state
+            // (getWanderTarget(), the unfiltered synched-data Optional), NOT
+            // hasWanderTarget() — that getter is dimension-checked (returns false for a
+            // Nether dragon holding an Overworld GlobalPos regardless of whether the
+            // packet armed it), so asserting through it was unreachable-dead: it could
+            // never fail even with the guard deleted. Red-proven sensitive by disabling
+            // the WANDER cross-dimension guard in DragonCommandPacket — see
+            // red-baseline.md ("Cleanup — de-vacuumed WANDER cross-dimension assertion").
+            if (found.getWanderTarget().isPresent()) {
+                helper.fail("WANDER armed a cross-dimension GlobalPos target (raw getWanderTarget() is present)"
+                        + " instead of being refused with feedback");
                 return;
             }
 
@@ -2842,7 +2848,8 @@ public class DragonWhistleTests {
     @EmptyTemplate(floor = true)
     @GameTest
     @TestHolder
-    public static void secondFollowPressWithinThrottleWindowGetsCooldownSignalNotNotFound(ExtendedGameTestHelper helper) {
+    public static void secondFollowPressWithinThrottleWindowGetsCooldownSignalNotNotFound(
+            ExtendedGameTestHelper helper) {
         var player = helper.makeTickingMockServerPlayerInLevel(GameType.DEFAULT_MODE);
         player.moveToCentre();
 
