@@ -186,8 +186,7 @@ public final class DragonAllyService {
      * delegation — a tamed pet's owner UUID. Anything else (wild mobs, untamed animals)
      * cannot participate in the mod-provider path and normalizes to {@code null}.
      */
-    @Nullable
-    private static UUID allyUuidOf(LivingEntity entity) {
+    @Nullable private static UUID allyUuidOf(LivingEntity entity) {
         if (entity instanceof Player player) return player.getUUID();
         if (entity instanceof TamableAnimal pet && pet.isTame()) return pet.getOwnerUUID();
         return null;

@@ -702,8 +702,7 @@ public class DragonWhistleHandler {
             // the fallback text directly in the packet, so old clients render it
             // correctly even without the key in their local lang file.
             player.displayClientMessage(
-                    Component.translatableWithFallback("dmr.dragon_call.walking", "Your dragon is on its way!"),
-                    true);
+                    Component.translatableWithFallback("dmr.dragon_call.walking", "Your dragon is on its way!"), true);
 
             DMR.LOGGER.debug(
                     "Making dragon: {} follow player: {}",

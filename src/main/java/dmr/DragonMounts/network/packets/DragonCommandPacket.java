@@ -222,8 +222,9 @@ public class DragonCommandPacket extends AbstractMessage<DragonCommandPacket> {
             // Fix-round: `now < lastFindDragonTick` (clock went backwards — a new
             // world/session reusing this same static map) is treated the same as the
             // throttle window having elapsed, never as "still throttled".
-            if (lastFindDragonTick == null || now < lastFindDragonTick || now - lastFindDragonTick
-                    >= FIND_DRAGON_THROTTLE_TICKS) {
+            if (lastFindDragonTick == null
+                    || now < lastFindDragonTick
+                    || now - lastFindDragonTick >= FIND_DRAGON_THROTTLE_TICKS) {
                 LAST_FIND_DRAGON_TICK.put(player.getUUID(), now);
                 dragon = DragonWhistleHandler.findDragon(player, index);
             } else {

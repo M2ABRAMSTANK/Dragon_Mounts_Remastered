@@ -46,6 +46,7 @@ public class DismountDragonPacketTests {
     @Test
     void autoSyncIsDisabled() {
         assertFalse(
-                new DismountDragonPacket(0, true).autoSync(), "DismountDragonPacket.autoSync() must stay false (W8-SYNC-2)");
+                new DismountDragonPacket(0, true).autoSync(),
+                "DismountDragonPacket.autoSync() must stay false (W8-SYNC-2)");
     }
 }

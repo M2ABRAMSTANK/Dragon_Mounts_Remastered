@@ -151,8 +151,8 @@ public class PathfindingRulesTests {
     })
     void walkSummonMaxDistanceNeverExceedsPathfindSearchRadius(
             double configuredWalkMaxDistance, double followRangeAttributeValue) {
-        double walkSummonMaxDistance =
-                ModConstants.DragonConstants.walkSummonMaxDistance(configuredWalkMaxDistance, followRangeAttributeValue);
+        double walkSummonMaxDistance = ModConstants.DragonConstants.walkSummonMaxDistance(
+                configuredWalkMaxDistance, followRangeAttributeValue);
         double pathfindSearchRadius = ModConstants.DragonConstants.pathfindSearchRadius(followRangeAttributeValue);
 
         assertTrue(

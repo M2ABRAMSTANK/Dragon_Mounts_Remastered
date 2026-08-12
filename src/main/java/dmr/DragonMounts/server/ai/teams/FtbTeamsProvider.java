@@ -67,7 +67,8 @@ final class FtbTeamsProvider implements TeamProvider {
         try {
             Object api = invokeStatic(API_CLASS, "api");
             Object manager = invokeInstance(api, "getManager");
-            return (boolean) invokeInstance(manager, "arePlayersInSameTeam", new Class<?>[] {UUID.class, UUID.class}, a, b);
+            return (boolean)
+                    invokeInstance(manager, "arePlayersInSameTeam", new Class<?>[] {UUID.class, UUID.class}, a, b);
         } catch (ReflectiveOperationException e) {
             // Rethrown unchecked so DragonAllyService#resolveViaProviders' fail-closed
             // catch(RuntimeException | LinkageError) still catches it for this provider

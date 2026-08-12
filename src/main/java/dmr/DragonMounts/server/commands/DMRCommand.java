@@ -245,7 +245,14 @@ public class DMRCommand {
         // having actually joined — today this reports success even when create()
         // returns null or a non-dragon, or when the join was refused.
         if (!added) {
-            source.sendFailure(Component.translatable("dmr.commands.dragon_spawn.failure", breedName));
+            // Cleanup-round (C6): dmr.commands.dragon_spawn.failure is a wave-8-added
+            // lang key — a .2/.3 client resolves keys from its OWN jar, so a plain
+            // translatable would render the raw key string there. Same fallback-embedding
+            // pattern as dmr.dragon_call.walking in DragonWhistleHandler.
+            source.sendFailure(Component.translatableWithFallback(
+                    "dmr.commands.dragon_spawn.failure",
+                    "Failed to spawn a %1$s: the entity's join was refused",
+                    breedName));
             return 0;
         }
 
@@ -332,7 +339,11 @@ public class DMRCommand {
 
             source.sendSuccess(() -> Component.translatable("dmr.commands.dragon_recall.success", id.toString()), true);
         } else {
+            // Cleanup-round: honest exit code — this is a failure (no dragon history for
+            // this id), so return 0 like every other sendFailure branch in this class
+            // instead of the success code brigadier callers/command blocks see as "ran".
             source.sendFailure(Component.translatable("dmr.commands.dragon_recall.failure", id.toString()));
+            return 0;
         }
         return 1;
     }

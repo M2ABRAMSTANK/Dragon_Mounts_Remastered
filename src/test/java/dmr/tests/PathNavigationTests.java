@@ -260,8 +260,7 @@ public class PathNavigationTests {
             helper.fail("DIAGNOSTIC path did not reach target through the open door: path="
                     + (path == null
                             ? "null"
-                            : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount() + " nodes="
-                                    + nodes))
+                            : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount() + " nodes=" + nodes))
                     + " allowFlying=" + evaluator.allowFlying + " allowSwimming=" + evaluator.allowSwimming
                     + " target=" + target);
         }
@@ -314,7 +313,8 @@ public class PathNavigationTests {
         helper.succeed();
     }
 
-    private static void assertDelegateTornDown(ExtendedGameTestHelper helper, DragonNodeEvaluator evaluator, String delegateFieldName) {
+    private static void assertDelegateTornDown(
+            ExtendedGameTestHelper helper, DragonNodeEvaluator evaluator, String delegateFieldName) {
         try {
             Field delegateField = DragonNodeEvaluator.class.getDeclaredField(delegateFieldName);
             delegateField.setAccessible(true);
@@ -331,7 +331,8 @@ public class PathNavigationTests {
                         + delegateFieldName + " delegate");
             }
         } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("Failed to inspect " + delegateFieldName + " teardown state via reflection", e);
+            throw new IllegalStateException(
+                    "Failed to inspect " + delegateFieldName + " teardown state via reflection", e);
         }
     }
 
@@ -484,7 +485,9 @@ public class PathNavigationTests {
                 }
             }
             helper.fail("DIAGNOSTIC flight path through leaf canopy did not reach: path="
-                    + (path == null ? "null" : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount() + " nodes=" + nodes))
+                    + (path == null
+                            ? "null"
+                            : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount() + " nodes=" + nodes))
                     + " target=" + target);
         }
 
@@ -608,8 +611,8 @@ public class PathNavigationTests {
         BlockPos leafAbsolute = helper.absolutePos(leafPos);
         for (int i = 0; i < path.getNodeCount(); i++) {
             if (path.getNodePos(i).equals(leafAbsolute)) {
-                helper.fail("Path routed a node directly onto the leaf block's own position "
-                        + leafAbsolute + " (node " + i + ") — a leaf-centred node must stay BLOCKED, not merely costed");
+                helper.fail("Path routed a node directly onto the leaf block's own position " + leafAbsolute + " (node "
+                        + i + ") — a leaf-centred node must stay BLOCKED, not merely costed");
             }
         }
 
@@ -754,7 +757,9 @@ public class PathNavigationTests {
                 }
             }
             helper.fail("DIAGNOSTIC path did not reach around the obstacle: path="
-                    + (path == null ? "null" : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount() + " nodes=" + nodes))
+                    + (path == null
+                            ? "null"
+                            : ("canReach=" + path.canReach() + " nodeCount=" + path.getNodeCount() + " nodes=" + nodes))
                     + " target=" + target);
             return;
         }
@@ -781,10 +786,11 @@ public class PathNavigationTests {
             }
         }
         if (!routedThroughGap) {
-            helper.fail("Path reached the target but the RETAINED portion (from nextNodeIndex=" + path.getNextNodeIndex()
-                    + " onward) contains no node within the gap's z-range (0-3) — the wall fully blocks z=4-14 at"
-                    + " x=5, so a genuinely retained detour MUST pass through the gap; this means the detour was"
-                    + " computed but discarded from the path the dragon will actually follow");
+            helper.fail(
+                    "Path reached the target but the RETAINED portion (from nextNodeIndex=" + path.getNextNodeIndex()
+                            + " onward) contains no node within the gap's z-range (0-3) — the wall fully blocks z=4-14 at"
+                            + " x=5, so a genuinely retained detour MUST pass through the gap; this means the detour was"
+                            + " computed but discarded from the path the dragon will actually follow");
         }
 
         helper.succeed();
@@ -893,7 +899,8 @@ public class PathNavigationTests {
         Path livePath = navigation.getPath();
         if (!started || livePath == null || livePath.isDone()) {
             helper.fail("DIAGNOSTIC setup failed to establish a live, in-progress path: started=" + started
-                    + " path=" + (livePath == null
+                    + " path="
+                    + (livePath == null
                             ? "null"
                             : ("isDone=" + livePath.isDone() + " nodeCount=" + livePath.getNodeCount())));
             return;
@@ -908,9 +915,8 @@ public class PathNavigationTests {
             return;
         }
         if (secondCall != livePath) {
-            helper.fail(
-                    "Throttled createPath for the SAME target returned a DIFFERENT Path object instead of handing"
-                            + " back the live path unchanged");
+            helper.fail("Throttled createPath for the SAME target returned a DIFFERENT Path object instead of handing"
+                    + " back the live path unchanged");
             return;
         }
 
@@ -1113,7 +1119,8 @@ public class PathNavigationTests {
     @EmptyTemplate(LARGE_TEMPLATE)
     @GameTest
     @TestHolder
-    public static void throttledCreatePathDoesNotServeStaleTargetAfterDirectCreatePathDesync(ExtendedGameTestHelper helper) {
+    public static void throttledCreatePathDoesNotServeStaleTargetAfterDirectCreatePathDesync(
+            ExtendedGameTestHelper helper) {
         fillBox(helper, new BlockPos(0, 0, 0), new BlockPos(34, 0, 4), Blocks.STONE.defaultBlockState());
 
         var dragon = helper.spawn(ModEntities.DRAGON_ENTITY.get(), new BlockPos(2, 2, 2));
@@ -1168,8 +1175,8 @@ public class PathNavigationTests {
         }
         BlockPos reachedTarget = result.getTarget();
         if (reachedTarget == null || !reachedTarget.equals(targetB2)) {
-            helper.fail("Throttled createPath for target B2 returned a path targeting " + reachedTarget
-                    + ", not B2 (" + targetB2 + ") — the desync sent the request to the wrong destination");
+            helper.fail("Throttled createPath for target B2 returned a path targeting " + reachedTarget + ", not B2 ("
+                    + targetB2 + ") — the desync sent the request to the wrong destination");
         }
 
         helper.succeed();

@@ -274,6 +274,8 @@ abstract class DragonBreathComponent extends DragonAnimationComponent {
             return false;
         }
         return getOwner() == null
-                || target != getOwner() && getOwner().canAttack(target) && !DragonAllyService.isAllied(target, getOwner());
+                || target != getOwner()
+                        && getOwner().canAttack(target)
+                        && !DragonAllyService.isAllied(target, getOwner());
     }
 }
